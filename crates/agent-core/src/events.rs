@@ -112,6 +112,18 @@ pub struct Usage {
     pub total_tokens: Option<u64>,
 }
 
+impl Usage {
+    /// Accumulate another report into this one (M2). A provider that omits a
+    /// field counts it as 0 — a single missing report must not erase the
+    /// totals accumulated so far.
+    pub fn add(&mut self, other: &Self) {
+        self.input_tokens = Some(self.input_tokens.unwrap_or(0) + other.input_tokens.unwrap_or(0));
+        self.output_tokens =
+            Some(self.output_tokens.unwrap_or(0) + other.output_tokens.unwrap_or(0));
+        self.total_tokens = Some(self.total_tokens.unwrap_or(0) + other.total_tokens.unwrap_or(0));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

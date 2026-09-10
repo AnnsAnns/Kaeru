@@ -14,6 +14,8 @@ use crate::error::{ApiError, ApiErrorKind, Result};
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 pub const DEFAULT_PORT: u16 = 8080;
+/// Deterministic context budget (ADR-018) in estimated tokens.
+pub const DEFAULT_MAX_PROMPT_TOKENS: u64 = 16_000;
 
 const DEFAULT_CONFIG_TOML: &str = r##"# Kaeru configuration. This file holds your provider API key:
 # keep it private (it is written with 0600 permissions and git-ignored).
@@ -39,6 +41,12 @@ api_key = ""
 
 # Default model for conversations (OpenRouter-style id, or your local model).
 model = "openai/gpt-4o-mini"
+
+[context]
+# Deterministic context budget (ADR-018), in estimated tokens: prompts are
+# assembled as [rolling summary] + recent window; when a conversation grows
+# past this budget, the oldest turns are summarized (never silently truncated).
+max_prompt_tokens = 16000
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,10 +58,32 @@ pub struct Config {
     auth_token: Option<String>,
     #[serde(default)]
     pub provider: ProviderConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 fn default_port() -> u16 {
     DEFAULT_PORT
+}
+
+fn default_max_prompt_tokens() -> u64 {
+    DEFAULT_MAX_PROMPT_TOKENS
+}
+
+/// Deterministic context policy knobs (ADR-018, M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextConfig {
+    #[serde(default = "default_max_prompt_tokens")]
+    pub max_prompt_tokens: u64,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_prompt_tokens: DEFAULT_MAX_PROMPT_TOKENS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +121,7 @@ impl Default for Config {
             port: DEFAULT_PORT,
             auth_token: None,
             provider: ProviderConfig::default(),
+            context: ContextConfig::default(),
         }
     }
 }
@@ -272,6 +303,16 @@ model = "llama3"
     fn empty_model_is_rejected() {
         let err = Config::parse("[provider]\nmodel = \"\"\n").unwrap_err();
         assert!(err.message.contains("model"));
+    }
+
+    #[test]
+    fn context_budget_is_configurable_with_a_default() {
+        let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(config.context.max_prompt_tokens, DEFAULT_MAX_PROMPT_TOKENS);
+        let config =
+            Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 100\n")
+                .unwrap();
+        assert_eq!(config.context.max_prompt_tokens, 100);
     }
 
     #[test]

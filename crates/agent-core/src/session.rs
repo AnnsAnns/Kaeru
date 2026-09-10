@@ -20,8 +20,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::AgentCore;
+use crate::context::{self, ContextPolicy};
 use crate::error::{ApiError, ApiErrorKind, Result};
-use crate::events::{CoreEvent, Decision, EventStream};
+use crate::events::{CoreEvent, Decision, EventStream, Usage};
 use crate::llm::{ChatMessage, ChatRequest};
 
 /// Broadcast capacity for one turn's events. Generous: a lagged consumer
@@ -36,6 +37,11 @@ pub struct ChatSession {
 
 struct SessionInner {
     history: Vec<ChatMessage>,
+    /// Rolling summary of turns that fell out of the context window (M2,
+    /// ADR-018); `None` while the conversation fits the budget.
+    summary: Option<String>,
+    /// Token usage accumulated over all turns incl. summary sub-calls.
+    accumulated_usage: Usage,
     model_override: Option<String>,
     next_turn_id: u64,
     active: Option<ActiveTurn>,
@@ -58,6 +64,8 @@ impl ChatSession {
             conversation_id: conversation_id.into(),
             inner: Arc::new(Mutex::new(SessionInner {
                 history: Vec::new(),
+                summary: None,
+                accumulated_usage: Usage::default(),
                 model_override: None,
                 next_turn_id: 1,
                 active: None,
@@ -93,6 +101,18 @@ impl ChatSession {
         self.lock().history.clone()
     }
 
+    /// Rolling summary of turns compacted out of the context window (M2,
+    /// ADR-018); `None` while the whole conversation fits the budget.
+    pub fn summary(&self) -> Option<String> {
+        self.lock().summary.clone()
+    }
+
+    /// Token usage accumulated over all turns, including summary sub-calls.
+    /// A provider that omits usage on some turns counts those as 0.
+    pub fn total_usage(&self) -> Usage {
+        self.lock().accumulated_usage
+    }
+
     pub fn is_active(&self) -> bool {
         self.lock().active.is_some()
     }
@@ -118,7 +138,13 @@ impl ChatSession {
             .clone()
             .unwrap_or_else(|| self.core.config().provider.model.clone());
         inner.history.push(ChatMessage::user(message));
-        let request = ChatRequest::new(model, inner.history.clone());
+        // The turn task assembles the prompt under the deterministic context
+        // budget (ADR-018); with an empty drop set this is exactly `history`.
+        let history = inner.history.clone();
+        let summary = inner.summary.clone();
+        let policy = ContextPolicy {
+            max_prompt_tokens: self.core.config().context.max_prompt_tokens,
+        };
 
         let turn_id = inner.next_turn_id;
         inner.next_turn_id += 1;
@@ -130,7 +156,10 @@ impl ChatSession {
             session: Arc::clone(&self.inner),
             turn_id,
             events: events.clone(),
-            request,
+            model,
+            history,
+            summary,
+            policy,
             partial: Arc::clone(&partial),
             cancelled: Arc::clone(&cancelled),
         }));
@@ -250,7 +279,10 @@ struct TurnTask {
     session: Arc<Mutex<SessionInner>>,
     turn_id: u64,
     events: broadcast::Sender<CoreEvent>,
-    request: ChatRequest,
+    model: String,
+    history: Vec<ChatMessage>,
+    summary: Option<String>,
+    policy: ContextPolicy,
     partial: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
 }
@@ -261,18 +293,57 @@ async fn run_turn(task: TurnTask) {
         session,
         turn_id,
         events,
-        request,
+        model,
+        history,
+        summary,
+        policy,
         partial,
         cancelled,
     } = task;
     let mut outcome = TurnOutcome::Completed;
+    let mut turn_usage: Option<Usage> = None;
+
+    // Deterministic context assembly (ADR-018): resolve overflow *before*
+    // the provider call — drop-oldest, then fold the dropped turns into the
+    // rolling summary with one bounded LLM sub-call. A failing summary
+    // degrades to a deterministic excerpt, never to a lost turn.
+    let (window, dropped) = context::split_window(policy, summary.as_deref(), &history);
+    let summary = if dropped.is_empty() {
+        summary
+    } else {
+        let mut summary_usage = Usage::default();
+        let new_summary = context::summarize(
+            core.client(),
+            &model,
+            summary.as_deref(),
+            &dropped,
+            &mut summary_usage,
+        )
+        .await;
+        if cancelled.load(Ordering::SeqCst) {
+            return; // aborted from outside; abort_turn owns the flush
+        }
+        let mut inner = session.lock().expect("session lock poisoned");
+        inner.accumulated_usage.add(&summary_usage);
+        inner.summary = Some(new_summary.clone());
+        inner.history = window.clone();
+        drop(inner);
+        tracing::info!(
+            target: "agent_core::session",
+            conversation_dropped = dropped.len(),
+            "compacted older turns into the rolling summary"
+        );
+        Some(new_summary)
+    };
+
+    let request = ChatRequest::new(model, context::assemble(None, summary.as_deref(), &window));
 
     let mut client_rx = match core.client().chat(request).await {
         Ok(rx) => rx,
         Err(err) => {
             outcome = TurnOutcome::Failed;
             let _ = events.send(CoreEvent::error(err.kind, err.message));
-            finalize_turn(&session, turn_id, &partial, outcome);
+            finalize_turn(&session, turn_id, &partial, outcome, turn_usage.as_ref());
             return;
         }
     };
@@ -296,6 +367,7 @@ async fn run_turn(task: TurnTask) {
             }
             CoreEvent::TurnDone { usage } => {
                 let _ = events.send(CoreEvent::TurnDone { usage });
+                turn_usage = usage;
                 break;
             }
             CoreEvent::Error { kind, message } => {
@@ -309,7 +381,7 @@ async fn run_turn(task: TurnTask) {
         }
     }
 
-    finalize_turn(&session, turn_id, &partial, outcome);
+    finalize_turn(&session, turn_id, &partial, outcome, turn_usage.as_ref());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +400,7 @@ fn finalize_turn(
     turn_id: u64,
     partial: &Arc<Mutex<String>>,
     outcome: TurnOutcome,
+    usage: Option<&Usage>,
 ) {
     let partial = partial.lock().expect("partial lock poisoned").clone();
     let mut inner = session.lock().expect("session lock poisoned");
@@ -336,6 +409,9 @@ fn finalize_turn(
         return; // aborted from outside; abort_turn owns the flush
     }
     inner.active = None;
+    if let Some(usage) = usage {
+        inner.accumulated_usage.add(usage);
+    }
 
     if !partial.is_empty() {
         inner.history.push(ChatMessage::assistant(partial));
@@ -732,11 +808,125 @@ mod tests {
         // Idle session: aborting a stale handle is a no-op.
         let fake_handle_session = Arc::new(Mutex::new(SessionInner {
             history: vec![],
+            summary: None,
+            accumulated_usage: Usage::default(),
             model_override: None,
             next_turn_id: 1,
             active: None,
         }));
         assert!(!abort_turn(&fake_handle_session, Some(99)).unwrap());
         assert!(!session.abort().unwrap());
+    }
+
+    #[tokio::test]
+    async fn over_budget_turn_compacts_oldest_turns_into_a_summary_and_answers() {
+        // Budget 4 estimated tokens: the ("hello", "Hello!") pair falls out of
+        // the window together (user-boundary alignment); only the new
+        // message stays and the pair is folded into the rolling summary.
+        let mut config = crate::config::Config::default();
+        config.context.max_prompt_tokens = 4;
+        let model = crate::config::DEFAULT_MODEL;
+
+        let first_request = ChatRequest::new(model, vec![ChatMessage::user("hello")]);
+        let dropped = vec![ChatMessage::user("hello"), ChatMessage::assistant("Hello!")];
+        let summary_request = crate::context::summary_request(model, None, &dropped);
+        let second_window = vec![ChatMessage::user("again")];
+        let second_request = ChatRequest::new(
+            model,
+            crate::context::assemble(None, Some("compact summary"), &second_window),
+        );
+
+        let cassette = Cassette {
+            interactions: vec![
+                Interaction {
+                    request: first_request,
+                    events: vec![
+                        CoreEvent::Delta {
+                            text: "Hello!".into(),
+                        },
+                        CoreEvent::TurnDone {
+                            usage: Some(Usage {
+                                input_tokens: Some(1),
+                                output_tokens: Some(2),
+                                total_tokens: None,
+                            }),
+                        },
+                    ],
+                },
+                Interaction {
+                    request: summary_request,
+                    events: vec![
+                        CoreEvent::Delta {
+                            text: "compact summary".into(),
+                        },
+                        CoreEvent::TurnDone {
+                            usage: Some(Usage {
+                                input_tokens: Some(10),
+                                output_tokens: Some(5),
+                                total_tokens: None,
+                            }),
+                        },
+                    ],
+                },
+                Interaction {
+                    request: second_request,
+                    events: vec![
+                        CoreEvent::Delta {
+                            text: "Answer 2".into(),
+                        },
+                        CoreEvent::TurnDone {
+                            usage: Some(Usage {
+                                input_tokens: Some(3),
+                                output_tokens: Some(4),
+                                total_tokens: None,
+                            }),
+                        },
+                    ],
+                },
+            ],
+            ..cassette_for(&ChatRequest::new("", vec![]), vec![])
+        };
+        let session = ChatSession::new(
+            Arc::new(AgentCore::new(
+                config,
+                std::sync::Arc::new(FakeProvider::from_cassette(cassette)),
+            )),
+            "test",
+        );
+
+        assert_eq!(session.summary(), None);
+        let h1 = session.send("hello").unwrap();
+        let received = drain(h1.into_events()).await;
+        assert!(
+            received
+                .last()
+                .is_some_and(|e| matches!(e, CoreEvent::TurnDone { .. }))
+        );
+        assert_eq!(session.total_usage().input_tokens, Some(1));
+
+        let h2 = session.send("again").unwrap();
+        let received = drain(h2.into_events()).await;
+        // The over-budget turn still answers (Appendix C, M2).
+        assert!(received.contains(&CoreEvent::Delta {
+            text: "Answer 2".into()
+        }));
+        assert!(
+            received
+                .iter()
+                .any(|e| matches!(e, CoreEvent::TurnDone { .. }))
+        );
+
+        // Drop-oldest + summary: history is truncated, summary is stored.
+        assert_eq!(session.summary(), Some("compact summary".into()));
+        assert_eq!(
+            session.history(),
+            vec![
+                ChatMessage::user("again"),
+                ChatMessage::assistant("Answer 2"),
+            ]
+        );
+        // Usage accounting covers the main turns and the summary sub-call.
+        assert_eq!(session.total_usage().input_tokens, Some(1 + 10 + 3));
+        assert_eq!(session.total_usage().output_tokens, Some(2 + 5 + 4));
     }
 }

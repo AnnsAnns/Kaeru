@@ -27,6 +27,7 @@
     "nostalgia",
   ];
   const THEME_KEY = "kaeru-theme";
+  const AUTH_KEY = "kaeru-auth-token";
 
   const state = {
     streaming: false,
@@ -53,6 +54,53 @@
     localStorage.setItem(THEME_KEY, next);
     applyTheme(next);
   });
+
+  /* ---------- auth token (M2: second layer behind CF Access) ---------- */
+
+  // Every /api/* call carries the shared secret when one is stored. It is
+  // entered once per browser (see showTokenPrompt) and never leaves the
+  // browser except as this header — the provider key never reaches it.
+  function apiFetch(path, options = {}) {
+    const token = localStorage.getItem(AUTH_KEY);
+    if (token) {
+      options.headers = { ...(options.headers || {}), "x-auth-token": token };
+    }
+    return fetch(path, options);
+  }
+
+  function showTokenPrompt(retry) {
+    removeEmptyHint();
+    const { body } = addBox("error", "access");
+    const text = document.createElement("p");
+    text.textContent =
+      "This server requires its shared secret (the auth_token from its config). " +
+      "Paste it once — it is stored only in this browser.";
+    const row = document.createElement("div");
+    row.className = "token-row";
+    const input = document.createElement("input");
+    input.type = "password";
+    input.className = "token-input";
+    input.placeholder = "auth token";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "action-btn";
+    save.textContent = "save";
+    save.addEventListener("click", () => {
+      const value = input.value.trim();
+      if (!value) return;
+      localStorage.setItem(AUTH_KEY, value);
+      retry();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") save.click();
+    });
+    row.append(input, save);
+    body.append(text, row);
+    scrollToBottom(true);
+    input.focus();
+  }
 
   /* ---------- rendering ---------- */
 
@@ -217,7 +265,7 @@
     try {
       const payload = { message };
       if (state.model) payload.model = state.model;
-      const response = await fetch("/api/chat", {
+      const response = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
@@ -300,7 +348,7 @@
     if (!state.streaming) return;
     state.stopped = true;
     try {
-      await fetch("/api/abort", {
+      await apiFetch("/api/abort", {
         method: "POST",
         signal: AbortSignal.timeout(2000),
       });
@@ -354,7 +402,13 @@
     applyTheme(loadTheme());
     showEmptyHint();
     try {
-      const session = await (await fetch("/api/session")).json();
+      const response = await apiFetch("/api/session");
+      if (response.status === 401) {
+        // Auth token required (tunnel deployments, M2): ask once per browser.
+        showTokenPrompt(bootstrap);
+        return;
+      }
+      const session = await response.json();
       state.fake = Boolean(session.fake);
       state.model = session.model || null;
       state.usage = {
@@ -364,7 +418,12 @@
       updateUsageBadge();
       if (state.fake) fakeBadge.hidden = false;
       renderRestored(session);
-      const { models } = await (await fetch("/api/models")).json();
+      const modelResponse = await apiFetch("/api/models");
+      if (modelResponse.status === 401) {
+        showTokenPrompt(bootstrap);
+        return;
+      }
+      const { models } = await modelResponse.json();
       const ids = models.map((m) => m.id);
       if (state.model && !ids.includes(state.model)) ids.unshift(state.model);
       for (const id of ids) {

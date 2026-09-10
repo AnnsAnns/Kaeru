@@ -70,17 +70,12 @@ html[data-theme="nostalgia"] {
 }
 
 :root {
-  /* accent palette (Bort @theme snapshot) */
-  --phlox: #c04cfd;
-  --hot-pink: #fc6dab;
-  --cream: #f7f6c5;
-  --beige: #f3fae1;
-  --darkpurpleish: #310a31;
-  --greypurpleish: #847996;
-  --eggplant: #6d435a;
-
   --font-bodyf: "National Park", "Helvetica", sans-serif;
   --font-headerf: "Reglisse Fill", "Arial Black", sans-serif;
+  --accent-color: color-mix(in srgb, var(--box-color-standard) 75%, color-mix(in srgb, var(--base-background-color) 50%, var(--base-text-color)));
+  --accent-contrast-color: var(--base-background-color);
+  --error-color: color-mix(in srgb, var(--base-text-color) 75%, var(--base-background-color));
+  --focus-color: var(--box-color-standard);
 }
 
 /* ---- base ---- */
@@ -97,7 +92,7 @@ body {
   box-sizing: border-box;
 }
 :focus-visible {
-  outline: 3px solid var(--phlox);
+  outline: 3px solid var(--focus-color);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -161,7 +156,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 4px;
 }
 .app-name {
   font-family: var(--font-headerf);
@@ -198,8 +192,8 @@ body {
   text-overflow: ellipsis;
 }
 .fake-badge {
-  background: var(--hot-pink);
-  color: var(--cream);
+  background: var(--accent-color);
+  color: var(--accent-contrast-color);
   box-shadow: none;
 }
 
@@ -208,42 +202,47 @@ body {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  padding: 4px 0;
+  margin-top: 8px;
+  margin-bottom: 8px;
   scrollbar-width: thin;
   scrollbar-color: var(--box-color-standard) var(--base-bd-background-color);
 }
 
 /* ---- message boxes ---- */
 .msg {
-  min-height: 120px; /* Bort's generous min size */
+  flex: 0 0 auto;
+  min-height: 120px;
   min-width: 120px;
   display: flex;
   flex-direction: column;
+  margin-top: 16px;
 }
 .msg-body {
   flex: 1;
-  padding-top: 10px;
+  padding-top: 8px;
   font-size: 17px;
   line-height: 1.45;
   white-space: pre-wrap;
+  text-wrap: wrap;
+  word-break: break-all;
 }
 .msg.you {
   align-self: flex-end;
-  --box-color-standard: var(--hot-pink); /* fixed accent, Bort-style */
+  --box-color-standard: var(--accent-color);
 }
 .msg.error {
   align-self: stretch;
-  --box-color-standard: var(--eggplant);
+  --box-color-standard: var(--error-color);
 }
 .msg.error .box-title {
-  color: var(--cream);
+  color: var(--accent-contrast-color);
 }
 .retry-btn {
   margin-top: 10px;
 }
 @media (min-width: 640px) {
   .msg.you {
-    max-width: 75%;
+    max-width: 88%;
   }
   .msg.kaeru {
     max-width: 88%;
@@ -276,6 +275,7 @@ body {
   min-height: 120px;
   display: flex;
   flex-direction: column;
+  --box-color-standard: var(--accent-color);
 }
 .composer-row {
   display: flex;
@@ -300,6 +300,26 @@ body {
 #composer::placeholder {
   opacity: 0.6;
 }
+.token-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 8px;
+}
+.token-input {
+  flex: 1;
+  min-height: 44px; /* one-finger target */
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--base-text-color);
+  font: inherit;
+  font-size: 17px;
+  padding: 8px 4px;
+}
+.token-input::placeholder {
+  opacity: 0.6;
+}
 .action-btn {
   align-self: flex-end;
   min-width: 72px;
@@ -319,7 +339,7 @@ body {
   box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 50%, transparent);
 }
 .action-btn.stop {
-  background: var(--hot-pink);
-  color: var(--cream);
-  box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--hot-pink) 50%, transparent);
+  background: var(--accent-color);
+  color: var(--accent-contrast-color);
+  box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--accent-color) 50%, transparent);
 }

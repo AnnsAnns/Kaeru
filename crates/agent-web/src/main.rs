@@ -17,7 +17,7 @@ mod routes;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_core::{AgentCore, ChatSession, ClientMode, Config, Paths};
+use agent_core::{AgentCore, ChatSession, ClientMode, Config, ConversationStore, Paths};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
@@ -126,8 +126,10 @@ fn main() {
         }
     };
 
-    // M1: a single in-memory conversation; persistence arrives in M2.
-    let session = Arc::new(ChatSession::new(Arc::clone(&core), "default"));
+    // M2: one persisted conversation ("default"); more conversations and a
+    // picker UI arrive with a later milestone. Reload restores it (§6.6).
+    let store = ConversationStore::new(cli.paths.conversations.clone());
+    let session = Arc::new(ChatSession::with_store(Arc::clone(&core), "default", store));
     let state = AppState::new(core, session);
 
     banner(&cli, &config, &state);
@@ -180,6 +182,10 @@ fn banner(cli: &Cli, config: &Config, state: &AppState) {
     );
     println!("  mode       : {mode}");
     println!("  auth       : {auth}");
+    println!(
+        "  history    : {} (survives restarts)",
+        cli.paths.conversations.display()
+    );
     println!("  config     : {}", cli.paths.config.display());
     println!();
 }

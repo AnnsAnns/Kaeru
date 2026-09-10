@@ -14,6 +14,7 @@
   const themeNameEl = $("theme-name");
   const modelSelect = $("model-select");
   const fakeBadge = $("fake-badge");
+  const usageBadge = $("usage-badge");
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -34,6 +35,7 @@
     model: null,
     fake: false,
     sticky: true,
+    usage: { in: 0, out: 0 },
   };
 
   /* ---------- theme (Bort switcher port: cycle + localStorage) ---------- */
@@ -122,6 +124,20 @@
     if (usage.input_tokens != null) parts.push(`${usage.input_tokens} in`);
     if (usage.output_tokens != null) parts.push(`${usage.output_tokens} out`);
     return parts.length ? ` · ${parts.join(" · ")}` : "";
+  }
+
+  /* ---------- accumulated usage (M2) ---------- */
+
+  function updateUsageBadge() {
+    const parts = [];
+    if (state.usage.in) parts.push(`${state.usage.in} in`);
+    if (state.usage.out) parts.push(`${state.usage.out} out`);
+    if (!parts.length) {
+      usageBadge.hidden = true;
+      return;
+    }
+    usageBadge.textContent = `tokens: ${parts.join(" · ")}`;
+    usageBadge.hidden = false;
   }
 
   /* ---------- SSE parsing (mirror of the server framing) ---------- */
@@ -260,6 +276,11 @@
       case "turn_done":
         turn.terminal = true;
         turn.usage = event.usage;
+        if (event.usage) {
+          state.usage.in += event.usage.input_tokens || 0;
+          state.usage.out += event.usage.output_tokens || 0;
+          updateUsageBadge();
+        }
         break;
       case "error":
         turn.terminal = true;
@@ -313,6 +334,22 @@
 
   /* ---------- bootstrap ---------- */
 
+  function renderRestored(session) {
+    if (session.summary) {
+      const box = addBox("kaeru", "kaeru · summary");
+      box.body.textContent = session.summary;
+    }
+    for (const message of session.history || []) {
+      const mine = message.role === "user";
+      const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
+      box.body.textContent = message.content;
+    }
+    if ((session.history || []).length || session.summary) {
+      removeEmptyHint();
+      scrollToBottom(true);
+    }
+  }
+
   async function bootstrap() {
     applyTheme(loadTheme());
     showEmptyHint();
@@ -320,7 +357,13 @@
       const session = await (await fetch("/api/session")).json();
       state.fake = Boolean(session.fake);
       state.model = session.model || null;
+      state.usage = {
+        in: (session.usage && session.usage.input_tokens) || 0,
+        out: (session.usage && session.usage.output_tokens) || 0,
+      };
+      updateUsageBadge();
       if (state.fake) fakeBadge.hidden = false;
+      renderRestored(session);
       const { models } = await (await fetch("/api/models")).json();
       const ids = models.map((m) => m.id);
       if (state.model && !ids.includes(state.model)) ids.unshift(state.model);

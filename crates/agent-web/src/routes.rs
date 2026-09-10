@@ -132,11 +132,17 @@ async fn get_models(State(state): State<AppState>) -> Response {
 }
 
 async fn get_session(State(state): State<AppState>) -> Response {
+    // Full reload/restore payload (§6.6, M2): history + summary + accumulated
+    // usage, so a browser refresh re-renders the conversation.
     Json(json!({
         "conversation": state.session.conversation_id(),
         "model": state.session.current_model(),
         "active": state.session.is_active(),
         "fake": state.core.is_fake(),
+        "title": state.session.title(),
+        "summary": state.session.summary(),
+        "history": serde_json::to_value(state.session.history()).unwrap_or_default(),
+        "usage": serde_json::to_value(state.session.total_usage()).unwrap_or_default(),
     }))
     .into_response()
 }
@@ -215,6 +221,34 @@ mod tests {
         assert_eq!(json["conversation"], "test");
         assert_eq!(json["fake"], true);
         assert_eq!(json["model"], agent_core::DEFAULT_MODEL);
+    }
+
+    #[tokio::test]
+    async fn session_endpoint_restores_history_after_a_reload() {
+        let state = AppState::fake();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/chat",
+            Some(&json!({ "message": "hello" })),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.into_body().collect().await;
+
+        let (status, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        let history = json["history"].as_array().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["role"], "user");
+        assert_eq!(history[0]["content"], "hello");
+        assert_eq!(history[1]["role"], "assistant");
+        assert_eq!(json["title"], "hello");
+        assert_eq!(json["summary"], serde_json::Value::Null);
+        // Accumulated usage: the builtin fake reports 21 in / 42 out / 63 total.
+        assert_eq!(json["usage"]["input_tokens"], 21);
+        assert_eq!(json["usage"]["total_tokens"], 63);
     }
 
     #[tokio::test]

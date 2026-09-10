@@ -21,6 +21,9 @@ use tokio::task::JoinHandle;
 
 use crate::AgentCore;
 use crate::context::{self, ContextPolicy};
+use crate::conversations::{
+    CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredMessage,
+};
 use crate::error::{ApiError, ApiErrorKind, Result};
 use crate::events::{CoreEvent, Decision, EventStream, Usage};
 use crate::llm::{ChatMessage, ChatRequest};
@@ -31,20 +34,26 @@ pub const TURN_EVENT_CAPACITY: usize = 1024;
 
 pub struct ChatSession {
     core: Arc<AgentCore>,
-    conversation_id: String,
     inner: Arc<Mutex<SessionInner>>,
 }
 
 struct SessionInner {
+    conversation_id: String,
     history: Vec<ChatMessage>,
     /// Rolling summary of turns that fell out of the context window (M2,
     /// ADR-018); `None` while the conversation fits the budget.
     summary: Option<String>,
     /// Token usage accumulated over all turns incl. summary sub-calls.
     accumulated_usage: Usage,
+    /// Human title, derived from the first user message (persisted).
+    title: Option<String>,
+    /// RFC 3339 creation timestamp (persisted).
+    created_at: String,
     model_override: Option<String>,
     next_turn_id: u64,
     active: Option<ActiveTurn>,
+    /// Persistence target; `None` for an ephemeral session (M1-style).
+    store: Option<ConversationStore>,
 }
 
 struct ActiveTurn {
@@ -58,18 +67,66 @@ struct ActiveTurn {
 }
 
 impl ChatSession {
+    /// An ephemeral in-memory session (tests, throwaway use). The frontend
+    /// binaries use [`ChatSession::with_store`] instead.
     pub fn new(core: Arc<AgentCore>, conversation_id: impl Into<String>) -> Self {
+        Self::build(core, conversation_id.into(), None)
+    }
+
+    /// A persisted session: an existing conversation file is loaded into
+    /// history/summary/usage on construction, and every finalized or aborted
+    /// turn is written back to the store (M2, §6.6 reload/restore).
+    /// A broken or future-schema file was already quarantined by the store;
+    /// an unreadable one logs a warning and starts empty — never a crash.
+    pub fn with_store(
+        core: Arc<AgentCore>,
+        conversation_id: impl Into<String>,
+        store: ConversationStore,
+    ) -> Self {
+        Self::build(core, conversation_id.into(), Some(store))
+    }
+
+    fn build(
+        core: Arc<AgentCore>,
+        conversation_id: String,
+        store: Option<ConversationStore>,
+    ) -> Self {
+        let mut inner = SessionInner {
+            conversation_id: conversation_id.clone(),
+            history: Vec::new(),
+            summary: None,
+            accumulated_usage: Usage::default(),
+            title: None,
+            created_at: crate::conversations::now_rfc3339(),
+            model_override: None,
+            next_turn_id: 1,
+            active: None,
+            store: None,
+        };
+        if let Some(store) = &store {
+            match store.load(&conversation_id) {
+                Ok(Some(conversation)) => {
+                    inner.history = conversation
+                        .messages
+                        .iter()
+                        .map(StoredMessage::to_chat)
+                        .collect();
+                    inner.summary = conversation.summary;
+                    inner.accumulated_usage = conversation.usage;
+                    inner.title = conversation.title;
+                    inner.created_at = conversation.created_at;
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!(
+                    target: "agent_core::session",
+                    "cannot load conversation {conversation_id}: {err}; starting empty"
+                ),
+            }
+        }
+        inner.store = store;
         Self {
             core,
-            conversation_id: conversation_id.into(),
-            inner: Arc::new(Mutex::new(SessionInner {
-                history: Vec::new(),
-                summary: None,
-                accumulated_usage: Usage::default(),
-                model_override: None,
-                next_turn_id: 1,
-                active: None,
-            })),
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
@@ -77,8 +134,13 @@ impl ChatSession {
         &self.core
     }
 
-    pub fn conversation_id(&self) -> &str {
-        &self.conversation_id
+    pub fn conversation_id(&self) -> String {
+        self.lock().conversation_id.clone()
+    }
+
+    /// Human-readable title (first user message); `None` until the first turn.
+    pub fn title(&self) -> Option<String> {
+        self.lock().title.clone()
     }
 
     /// The model used for the next turn: per-conversation override, else the
@@ -96,7 +158,8 @@ impl ChatSession {
         self.lock().model_override = model;
     }
 
-    /// Snapshot of the conversation history (M1: in-memory only, M2 persists).
+    /// Snapshot of the conversation history (the recent window; older turns
+    /// live in [`ChatSession::summary`]).
     pub fn history(&self) -> Vec<ChatMessage> {
         self.lock().history.clone()
     }
@@ -138,6 +201,9 @@ impl ChatSession {
             .clone()
             .unwrap_or_else(|| self.core.config().provider.model.clone());
         inner.history.push(ChatMessage::user(message));
+        if inner.title.is_none() {
+            inner.title = Some(derive_title(message));
+        }
         // The turn task assembles the prompt under the deterministic context
         // budget (ADR-018); with an empty drop set this is exactly `history`.
         let history = inner.history.clone();
@@ -208,6 +274,49 @@ impl ChatSession {
     }
 }
 
+impl SessionInner {
+    fn to_conversation(&self) -> Conversation {
+        Conversation {
+            schema: CONVERSATION_SCHEMA_VERSION,
+            id: self.conversation_id.clone(),
+            title: self.title.clone(),
+            created_at: self.created_at.clone(),
+            summary: self.summary.clone(),
+            messages: self.history.iter().map(StoredMessage::from).collect(),
+            usage: self.accumulated_usage,
+        }
+    }
+
+    /// Write the conversation back to the store (when there is one). Never
+    /// fails a turn: persistence errors are logged and the state stays in
+    /// memory (quality goal: completed turns are not lost *by the store*).
+    fn persist(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Err(err) = store.save(&self.to_conversation()) {
+            tracing::warn!(
+                target: "agent_core::session",
+                "cannot persist conversation {}: {err} (kept in memory)",
+                self.conversation_id
+            );
+        }
+    }
+}
+
+/// Title for a conversation, from its first user message.
+fn derive_title(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or("").trim();
+    let mut title: String = first_line.chars().take(60).collect();
+    if first_line.chars().count() > 60 {
+        title.push('…');
+    }
+    if title.is_empty() {
+        title = "untitled".into();
+    }
+    title
+}
+
 /// Per-turn handle: the request-scoped event stream plus turn-scoped abort.
 ///
 /// The handle owns the turn's primordial receiver from the moment `send`
@@ -271,6 +380,7 @@ fn abort_turn(inner: &Arc<Mutex<SessionInner>>, only: Option<u64>) -> Result<boo
     let _ = active
         .events
         .send(CoreEvent::error(ApiErrorKind::Aborted, "turn aborted"));
+    inner.persist();
     Ok(true)
 }
 
@@ -426,6 +536,8 @@ fn finalize_turn(
             inner.history.pop();
         }
     }
+    // Persist after every finalized turn ("serialize on finalize", M2).
+    inner.persist();
 }
 
 #[cfg(test)]
@@ -807,12 +919,16 @@ mod tests {
         let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
         // Idle session: aborting a stale handle is a no-op.
         let fake_handle_session = Arc::new(Mutex::new(SessionInner {
+            conversation_id: "test".into(),
             history: vec![],
             summary: None,
             accumulated_usage: Usage::default(),
+            title: None,
+            created_at: "1970-01-01T00:00:00Z".into(),
             model_override: None,
             next_turn_id: 1,
             active: None,
+            store: None,
         }));
         assert!(!abort_turn(&fake_handle_session, Some(99)).unwrap());
         assert!(!session.abort().unwrap());
@@ -928,5 +1044,111 @@ mod tests {
         // Usage accounting covers the main turns and the summary sub-call.
         assert_eq!(session.total_usage().input_tokens, Some(1 + 10 + 3));
         assert_eq!(session.total_usage().output_tokens, Some(2 + 5 + 4));
+    }
+
+    #[tokio::test]
+    async fn persisted_conversation_reloads_after_restart() {
+        let dir = std::env::temp_dir().join(format!("kaeru-test-{}-persist", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let store = ConversationStore::new(&dir);
+
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user(
+                "a longer first question, good for a title",
+            )],
+        );
+        let cassette = cassette_for(
+            &request,
+            vec![
+                CoreEvent::Delta {
+                    text: "Hello!".into(),
+                },
+                CoreEvent::TurnDone {
+                    usage: Some(Usage {
+                        input_tokens: Some(4),
+                        output_tokens: Some(6),
+                        total_tokens: Some(10),
+                    }),
+                },
+            ],
+        );
+
+        // "Process 1": chat, then shut down.
+        {
+            let session = ChatSession::with_store(
+                core_with(FakeProvider::from_cassette(cassette.clone())),
+                "default",
+                store.clone(),
+            );
+            assert!(session.history().is_empty());
+            let handle = session
+                .send("a longer first question, good for a title")
+                .unwrap();
+            drain(handle.into_events()).await;
+            assert_eq!(session.history().len(), 2);
+        }
+
+        // "Process 2": same data dir — reload restores history, usage, title.
+        let session = ChatSession::with_store(
+            core_with(FakeProvider::from_cassette(cassette)),
+            "default",
+            store,
+        );
+        assert_eq!(
+            session.conversation_id(),
+            "default",
+            "conversation id must survive restarts"
+        );
+        let history = session.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0],
+            ChatMessage::user("a longer first question, good for a title")
+        );
+        assert_eq!(history[1], ChatMessage::assistant("Hello!"));
+        assert_eq!(
+            session.title().as_deref(),
+            Some("a longer first question, good for a title")
+        );
+        assert_eq!(session.total_usage().input_tokens, Some(4));
+        assert_eq!(session.total_usage().output_tokens, Some(6));
+
+        // The file on disk carries the planned schema (Appendix C: schema: 1).
+        let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(json["usage"]["total_tokens"], 10);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_conversation_file_starts_empty_not_broken() {
+        let dir = std::env::temp_dir().join(format!("kaeru-test-{}-broken", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("default.json"), "}{ broken").unwrap();
+
+        let session = ChatSession::with_store(
+            core_with(FakeProvider::builtin()),
+            "default",
+            ConversationStore::new(&dir),
+        );
+        assert!(session.history().is_empty());
+        assert_eq!(session.conversation_id(), "default");
+        assert!(dir.join("default.json.quarantine").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn titles_come_from_the_first_user_message() {
+        assert_eq!(derive_title("hello"), "hello");
+        assert_eq!(derive_title("first line\nsecond line"), "first line");
+        let long = "x".repeat(100);
+        let title = derive_title(&long);
+        assert_eq!(title.chars().count(), 61);
+        assert!(title.ends_with('…'));
+        assert_eq!(derive_title("   "), "untitled");
     }
 }

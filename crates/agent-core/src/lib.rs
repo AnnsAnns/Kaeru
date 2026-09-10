@@ -9,6 +9,7 @@
 //! (M3), memory (M4), and the sandbox (M5) — see `docs/arc42-architecture.md`.
 
 pub mod config;
+pub mod conversations;
 pub mod error;
 pub mod events;
 pub mod llm;
@@ -17,6 +18,9 @@ pub mod session;
 use std::sync::Arc;
 
 pub use config::{Config, DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_PORT, Paths, ProviderConfig};
+pub use conversations::{
+    CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredMessage,
+};
 pub use error::{ApiError, ApiErrorKind, Result};
 pub use events::{ApprovalKind, CoreEvent, Decision, EventStream, Risk, Usage};
 pub use llm::{

@@ -198,6 +198,7 @@ impl Config {
 pub struct Paths {
     pub config: PathBuf,
     pub cassette: PathBuf,
+    pub conversations: PathBuf,
 }
 
 impl Default for Paths {
@@ -205,6 +206,7 @@ impl Default for Paths {
         Self {
             config: PathBuf::from("data/config.toml"),
             cassette: PathBuf::from("data/cassette.json"),
+            conversations: PathBuf::from("data/conversations"),
         }
     }
 }

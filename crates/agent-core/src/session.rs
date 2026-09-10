@@ -1,0 +1,742 @@
+//! `ChatSession` + `TurnHandle`: the decoupled turn executor (ADR-015).
+//!
+//! API shape is final from M1; the wiring is the documented M1 interim:
+//! `send` spawns the turn in the background and returns a `TurnHandle` whose
+//! event stream is request-scoped — when the last subscriber drops, the turn
+//! aborts. M3 replaces that wiring with an executor that survives frontend
+//! disconnects and replays a bounded buffer on `subscribe`, without any
+//! frontend change.
+//!
+//! Concurrency model: one active turn per session (`send` while active is
+//! `ApiErrorKind::Busy`). All session state lives behind a single
+//! `std::sync::Mutex` whose critical sections never await. History-flush
+//! races between the turn task and `abort` are resolved by turn-id guard:
+//! exactly one of them finalizes.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
+
+use crate::AgentCore;
+use crate::error::{ApiError, ApiErrorKind, Result};
+use crate::events::{CoreEvent, Decision, EventStream};
+use crate::llm::{ChatMessage, ChatRequest};
+
+/// Broadcast capacity for one turn's events. Generous: a lagged consumer
+/// only loses chat text (logged), never correctness.
+pub const TURN_EVENT_CAPACITY: usize = 1024;
+
+pub struct ChatSession {
+    core: Arc<AgentCore>,
+    conversation_id: String,
+    inner: Arc<Mutex<SessionInner>>,
+}
+
+struct SessionInner {
+    history: Vec<ChatMessage>,
+    model_override: Option<String>,
+    next_turn_id: u64,
+    active: Option<ActiveTurn>,
+}
+
+struct ActiveTurn {
+    turn_id: u64,
+    join: JoinHandle<()>,
+    events: broadcast::Sender<CoreEvent>,
+    /// Assistant text streamed so far; read by `abort` to flush a partial
+    /// answer into history, since the aborted task cannot.
+    partial: Arc<Mutex<String>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ChatSession {
+    pub fn new(core: Arc<AgentCore>, conversation_id: impl Into<String>) -> Self {
+        Self {
+            core,
+            conversation_id: conversation_id.into(),
+            inner: Arc::new(Mutex::new(SessionInner {
+                history: Vec::new(),
+                model_override: None,
+                next_turn_id: 1,
+                active: None,
+            })),
+        }
+    }
+
+    pub fn core(&self) -> &Arc<AgentCore> {
+        &self.core
+    }
+
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    /// The model used for the next turn: per-conversation override, else the
+    /// configured default.
+    pub fn current_model(&self) -> String {
+        let inner = self.lock();
+        inner
+            .model_override
+            .clone()
+            .unwrap_or_else(|| self.core.config().provider.model.clone())
+    }
+
+    /// Set or clear (None) the per-conversation model override.
+    pub fn set_model(&self, model: Option<String>) {
+        self.lock().model_override = model;
+    }
+
+    /// Snapshot of the conversation history (M1: in-memory only, M2 persists).
+    pub fn history(&self) -> Vec<ChatMessage> {
+        self.lock().history.clone()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.lock().active.is_some()
+    }
+
+    /// Send a user message and start a turn.
+    ///
+    /// Returns immediately with a handle to the running turn. Fails with
+    /// `Busy` while another turn is active, and `Config` on empty input.
+    pub fn send(&self, message: &str) -> Result<TurnHandle> {
+        if message.trim().is_empty() {
+            return Err(ApiError::config("message must not be empty"));
+        }
+        let mut inner = self.lock();
+        if inner.active.is_some() {
+            return Err(ApiError::new(
+                ApiErrorKind::Busy,
+                "a turn is already in progress; abort it first",
+            ));
+        }
+
+        let model = inner
+            .model_override
+            .clone()
+            .unwrap_or_else(|| self.core.config().provider.model.clone());
+        inner.history.push(ChatMessage::user(message));
+        let request = ChatRequest::new(model, inner.history.clone());
+
+        let turn_id = inner.next_turn_id;
+        inner.next_turn_id += 1;
+        let (events, rx) = broadcast::channel(TURN_EVENT_CAPACITY);
+        let partial = Arc::new(Mutex::new(String::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let join = tokio::spawn(run_turn(TurnTask {
+            core: Arc::clone(&self.core),
+            session: Arc::clone(&self.inner),
+            turn_id,
+            events: events.clone(),
+            request,
+            partial: Arc::clone(&partial),
+            cancelled: Arc::clone(&cancelled),
+        }));
+        inner.active = Some(ActiveTurn {
+            turn_id,
+            join,
+            events: events.clone(),
+            partial,
+            cancelled,
+        });
+        Ok(TurnHandle {
+            turn_id,
+            rx,
+            events,
+            session: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Live tap into the active turn's events (no replay until M3).
+    ///
+    /// With no active turn this is an already-closed stream.
+    pub fn subscribe(&self) -> EventStream {
+        let inner = self.lock();
+        match &inner.active {
+            Some(active) => active.events.subscribe(),
+            None => broadcast::channel(1).1,
+        }
+    }
+
+    /// Abort the active turn (no-op when idle). The aborted stream receives
+    /// one terminal `Error { kind: Aborted }` and closes; the partial answer
+    /// is kept in history.
+    pub fn abort(&self) -> Result<bool> {
+        abort_turn(&self.inner, None)
+    }
+
+    /// Record a consent decision. Staged API: consent lands with tools in M3.
+    pub async fn approve(&self, _request_id: &str, _decision: Decision) -> Result<()> {
+        Err(ApiError::internal(
+            "consent flow is not implemented yet; it arrives with the agent loop in M3",
+        ))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SessionInner> {
+        self.inner.lock().expect("session lock poisoned")
+    }
+}
+
+/// Per-turn handle: the request-scoped event stream plus turn-scoped abort.
+///
+/// The handle owns the turn's primordial receiver from the moment `send`
+/// returns (no lost-events window), plus the sender for extra live taps.
+/// `into_events()` replays from the turn's start; `events()` taps from now.
+pub struct TurnHandle {
+    turn_id: u64,
+    rx: broadcast::Receiver<CoreEvent>,
+    events: broadcast::Sender<CoreEvent>,
+    session: Arc<Mutex<SessionInner>>,
+}
+
+impl std::fmt::Debug for TurnHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnHandle")
+            .field("turn_id", &self.turn_id)
+            .finish()
+    }
+}
+
+impl TurnHandle {
+    pub fn turn_id(&self) -> u64 {
+        self.turn_id
+    }
+
+    /// A fresh live subscription to this turn's events (from now on).
+    pub fn events(&self) -> EventStream {
+        self.events.subscribe()
+    }
+
+    /// Consume the handle into the turn's event stream (from the turn start).
+    pub fn into_events(self) -> EventStream {
+        self.rx
+    }
+
+    /// Abort this turn (no-op if it already finished or was superseded).
+    pub fn abort(&self) -> Result<bool> {
+        abort_turn(&self.session, Some(self.turn_id))
+    }
+}
+
+fn abort_turn(inner: &Arc<Mutex<SessionInner>>, only: Option<u64>) -> Result<bool> {
+    let mut inner = inner.lock().expect("session lock poisoned");
+    let is_target = |active: &ActiveTurn| only.is_none_or(|id| active.turn_id == id);
+    if !inner.active.as_ref().is_some_and(is_target) {
+        return Ok(false);
+    }
+    let active = inner.active.take().expect("checked above");
+    // Order matters: set the flag before aborting so the task's finalizer sees
+    // it and never races a duplicate history flush past the id guard.
+    active.cancelled.store(true, Ordering::SeqCst);
+    active.join.abort();
+    let partial = active
+        .partial
+        .lock()
+        .expect("partial lock poisoned")
+        .clone();
+    if !partial.is_empty() {
+        inner.history.push(ChatMessage::assistant(partial));
+    }
+    let _ = active
+        .events
+        .send(CoreEvent::error(ApiErrorKind::Aborted, "turn aborted"));
+    Ok(true)
+}
+
+struct TurnTask {
+    core: Arc<AgentCore>,
+    session: Arc<Mutex<SessionInner>>,
+    turn_id: u64,
+    events: broadcast::Sender<CoreEvent>,
+    request: ChatRequest,
+    partial: Arc<Mutex<String>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+async fn run_turn(task: TurnTask) {
+    let TurnTask {
+        core,
+        session,
+        turn_id,
+        events,
+        request,
+        partial,
+        cancelled,
+    } = task;
+    let mut outcome = TurnOutcome::Completed;
+
+    let mut client_rx = match core.client().chat(request).await {
+        Ok(rx) => rx,
+        Err(err) => {
+            outcome = TurnOutcome::Failed;
+            let _ = events.send(CoreEvent::error(err.kind, err.message));
+            finalize_turn(&session, turn_id, &partial, outcome);
+            return;
+        }
+    };
+
+    while let Some(event) = client_rx.recv().await {
+        if cancelled.load(Ordering::SeqCst) {
+            // Aborted from outside: abort_turn flushed history and emitted the
+            // terminal event already.
+            return;
+        }
+        match event {
+            CoreEvent::Delta { text } => {
+                partial
+                    .lock()
+                    .expect("partial lock poisoned")
+                    .push_str(&text);
+                if events.send(CoreEvent::Delta { text }).is_err() {
+                    outcome = TurnOutcome::Disconnected;
+                    break;
+                }
+            }
+            CoreEvent::TurnDone { usage } => {
+                let _ = events.send(CoreEvent::TurnDone { usage });
+                break;
+            }
+            CoreEvent::Error { kind, message } => {
+                outcome = TurnOutcome::Failed;
+                let _ = events.send(CoreEvent::error(kind, message));
+                break;
+            }
+            other => {
+                let _ = events.send(other); // future variants pass through
+            }
+        }
+    }
+
+    finalize_turn(&session, turn_id, &partial, outcome);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnOutcome {
+    /// Provider finished (or the client stream ended without a terminal event
+    /// — tolerated as completion).
+    Completed,
+    /// Provider failed before finishing.
+    Failed,
+    /// Every frontend subscriber disappeared; M1 wiring aborts the turn.
+    Disconnected,
+}
+
+fn finalize_turn(
+    session: &Arc<Mutex<SessionInner>>,
+    turn_id: u64,
+    partial: &Arc<Mutex<String>>,
+    outcome: TurnOutcome,
+) {
+    let partial = partial.lock().expect("partial lock poisoned").clone();
+    let mut inner = session.lock().expect("session lock poisoned");
+    let still_current = inner.active.as_ref().is_some_and(|a| a.turn_id == turn_id);
+    if !still_current {
+        return; // aborted from outside; abort_turn owns the flush
+    }
+    inner.active = None;
+
+    if !partial.is_empty() {
+        inner.history.push(ChatMessage::assistant(partial));
+    } else if outcome == TurnOutcome::Failed {
+        // The model produced nothing before failing: drop the trailing user
+        // message so a retry resends cleanly instead of duplicating it.
+        if inner
+            .history
+            .last()
+            .is_some_and(|m| m.role == crate::llm::Role::User)
+        {
+            inner.history.pop();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{ApprovalKind, Usage};
+    use crate::llm::{Cassette, FakeProvider, Interaction};
+    use std::time::Duration;
+
+    fn core_with(fake: FakeProvider) -> Arc<AgentCore> {
+        Arc::new(AgentCore::new(
+            crate::config::Config::default(),
+            std::sync::Arc::new(fake),
+        ))
+    }
+
+    fn cassette_for(request: &ChatRequest, events: Vec<CoreEvent>) -> Cassette {
+        Cassette {
+            cassette_version: 1,
+            recorded_at_unix: None,
+            base_url: None,
+            models: vec![],
+            interactions: vec![Interaction {
+                request: request.clone(),
+                events,
+            }],
+        }
+    }
+
+    async fn drain(mut rx: EventStream) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(event) => events.push(event),
+                Err(broadcast::error::RecvError::Closed) => return events,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    panic!("unexpected lag of {n} events in a unit test stream")
+                }
+            }
+        }
+    }
+
+    fn quick_turn(events: Vec<CoreEvent>) -> (Arc<AgentCore>, ChatRequest) {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        (
+            core_with(FakeProvider::from_cassette(cassette_for(&request, events))),
+            request,
+        )
+    }
+
+    #[tokio::test]
+    async fn happy_path_streams_and_records_history() {
+        let (core, request) = quick_turn(vec![
+            CoreEvent::Delta { text: "Hel".into() },
+            CoreEvent::Delta { text: "lo".into() },
+            CoreEvent::TurnDone {
+                usage: Some(Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(2),
+                    total_tokens: None,
+                }),
+            },
+        ]);
+        let session = ChatSession::new(core, "test");
+
+        let handle = session.send("hello").unwrap();
+        let events = drain(handle.into_events()).await;
+        assert_eq!(
+            events,
+            vec![
+                CoreEvent::Delta { text: "Hel".into() },
+                CoreEvent::Delta { text: "lo".into() },
+                CoreEvent::TurnDone {
+                    usage: Some(Usage {
+                        input_tokens: Some(1),
+                        output_tokens: Some(2),
+                        total_tokens: None
+                    })
+                },
+            ]
+        );
+
+        let history = session.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0], ChatMessage::user("hello"));
+        assert_eq!(history[1], ChatMessage::assistant("Hello"));
+        assert!(!session.is_active());
+        // The request the provider saw must contain exactly this history.
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn second_turn_request_carries_conversation_history() {
+        let first = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let second = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("Hello"),
+                ChatMessage::user("again"),
+            ],
+        );
+        let cassette = Cassette {
+            interactions: vec![
+                Interaction {
+                    request: first,
+                    events: vec![
+                        CoreEvent::Delta {
+                            text: "Hello".into(),
+                        },
+                        CoreEvent::TurnDone { usage: None },
+                    ],
+                },
+                Interaction {
+                    request: second,
+                    events: vec![
+                        CoreEvent::Delta {
+                            text: "Again".into(),
+                        },
+                        CoreEvent::TurnDone { usage: None },
+                    ],
+                },
+            ],
+            ..cassette_for(&ChatRequest::new("", vec![]), vec![])
+        };
+        let session = ChatSession::new(core_with(FakeProvider::from_cassette(cassette)), "test");
+
+        let h1 = session.send("hello").unwrap();
+        drain(h1.into_events()).await;
+        let h2 = session.send("again").unwrap();
+        let events = drain(h2.into_events()).await;
+        assert_eq!(
+            events,
+            vec![
+                CoreEvent::Delta {
+                    text: "Again".into()
+                },
+                CoreEvent::TurnDone { usage: None },
+            ]
+        );
+        assert_eq!(session.history().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn busy_turn_is_rejected() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let session = ChatSession::new(
+            core_with(
+                FakeProvider::from_cassette(cassette_for(
+                    &request,
+                    vec![
+                        CoreEvent::Delta { text: "s".into() },
+                        CoreEvent::TurnDone { usage: None },
+                    ],
+                ))
+                .with_delay(Duration::from_millis(30)),
+            ),
+            "test",
+        );
+
+        let handle = session.send("hello").unwrap();
+        let err = session.send("hello").unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::Busy);
+        drain(handle.into_events()).await;
+        assert!(!session.is_active());
+    }
+
+    #[tokio::test]
+    async fn abort_stops_the_turn_and_keeps_partial_text() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let mut events = Vec::new();
+        for i in 0..20 {
+            events.push(CoreEvent::Delta {
+                text: format!("chunk{i} "),
+            });
+        }
+        events.push(CoreEvent::TurnDone { usage: None });
+        let fake = FakeProvider::from_cassette(cassette_for(&request, events))
+            .with_delay(Duration::from_millis(25));
+        let session = ChatSession::new(core_with(fake), "test");
+
+        let handle = session.send("hello").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(session.abort().unwrap());
+        let received = drain(handle.into_events()).await;
+
+        assert!(received.iter().any(|e| matches!(
+            e,
+            CoreEvent::Error {
+                kind: ApiErrorKind::Aborted,
+                ..
+            }
+        )));
+        let history = session.history();
+        assert_eq!(history[0], ChatMessage::user("hello"));
+        let partial = history[1].content.clone();
+        assert!(
+            partial.contains("chunk0"),
+            "partial answer must be kept, got: {partial:?}"
+        );
+        assert!(
+            partial.len() < "chunk0 ".len() * 20,
+            "partial must be truncated, got: {partial:?}"
+        );
+        assert!(!session.is_active());
+    }
+
+    #[tokio::test]
+    async fn provider_failure_with_no_output_pops_the_user_message_for_a_clean_retry() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let session = ChatSession::new(
+            core_with(FakeProvider::from_cassette(cassette_for(
+                &request,
+                vec![CoreEvent::error(ApiErrorKind::Unauthorized, "bad key")],
+            ))),
+            "test",
+        );
+
+        let handle = session.send("hello").unwrap();
+        let received = drain(handle.into_events()).await;
+        assert!(matches!(
+            received[0],
+            CoreEvent::Error {
+                kind: ApiErrorKind::Unauthorized,
+                ..
+            }
+        ));
+        assert!(
+            session.history().is_empty(),
+            "failed turn with no output must leave history clean"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_after_partial_output_keeps_the_partial() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let session = ChatSession::new(
+            core_with(FakeProvider::from_cassette(cassette_for(
+                &request,
+                vec![
+                    CoreEvent::Delta {
+                        text: "partial answer".into(),
+                    },
+                    CoreEvent::error(ApiErrorKind::Provider, "provider exploded mid-stream"),
+                ],
+            ))),
+            "test",
+        );
+
+        let handle = session.send("hello").unwrap();
+        drain(handle.into_events()).await;
+        let history = session.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1], ChatMessage::assistant("partial answer"));
+    }
+
+    #[tokio::test]
+    async fn dropped_subscriber_aborts_the_turn_with_partial_kept() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let mut events = Vec::new();
+        for i in 0..10 {
+            events.push(CoreEvent::Delta {
+                text: format!("d{i} "),
+            });
+        }
+        events.push(CoreEvent::TurnDone { usage: None });
+        let fake = FakeProvider::from_cassette(cassette_for(&request, events))
+            .with_delay(Duration::from_millis(20));
+        let session = ChatSession::new(core_with(fake), "test");
+
+        let handle = session.send("hello").unwrap();
+        drop(handle); // frontend disconnect: M1 wiring aborts the turn
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if session.history().len() == 2 || tokio::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let history = session.history();
+        assert_eq!(
+            history.len(),
+            2,
+            "user message + partial answer must be kept"
+        );
+        assert!(history[1].content.contains("d0"));
+        assert!(!session.is_active());
+    }
+
+    #[tokio::test]
+    async fn subscribe_taps_the_active_turn_and_closes_after_it_ends() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let fake = FakeProvider::from_cassette(cassette_for(
+            &request,
+            vec![
+                CoreEvent::Delta { text: "x".into() },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ))
+        .with_delay(Duration::from_millis(40));
+        let session = ChatSession::new(core_with(fake), "test");
+
+        let handle = session.send("hello").unwrap();
+        let mut tap = session.subscribe();
+        let tapped = tokio::time::timeout(Duration::from_secs(2), tap.recv()).await;
+        assert!(tapped.is_ok(), "live subscriber must receive events");
+        drain(handle.into_events()).await;
+
+        let mut idle = session.subscribe();
+        match idle.recv().await {
+            Err(broadcast::error::RecvError::Closed) => {}
+            other => panic!("idle subscribe must be a closed stream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_override_reaches_the_provider_request() {
+        let request = ChatRequest::new("custom/model", vec![ChatMessage::user("hello")]);
+        let session = ChatSession::new(
+            core_with(FakeProvider::from_cassette(cassette_for(
+                &request,
+                vec![CoreEvent::TurnDone { usage: None }],
+            ))),
+            "test",
+        );
+        session.set_model(Some("custom/model".into()));
+        assert_eq!(session.current_model(), "custom/model");
+        let handle = session.send("hello").unwrap();
+        drain(handle.into_events()).await;
+        session.set_model(None);
+        assert_eq!(session.current_model(), crate::config::DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn empty_message_is_rejected() {
+        let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
+        let err = session.send("   ").unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::Config);
+    }
+
+    #[tokio::test]
+    async fn approve_is_staged_for_m3() {
+        let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
+        let err = session
+            .approve("appr_1", Decision::Allow)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::Internal);
+        let _ = ApprovalKind::PackageInstall { packages: vec![] }; // types present from M1
+    }
+
+    #[test]
+    fn turn_handle_abort_is_id_guarded() {
+        let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
+        // Idle session: aborting a stale handle is a no-op.
+        let fake_handle_session = Arc::new(Mutex::new(SessionInner {
+            history: vec![],
+            model_override: None,
+            next_turn_id: 1,
+            active: None,
+        }));
+        assert!(!abort_turn(&fake_handle_session, Some(99)).unwrap());
+        assert!(!session.abort().unwrap());
+    }
+}

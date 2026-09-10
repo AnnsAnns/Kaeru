@@ -1,0 +1,325 @@
+/* kaeru app.css — plain-CSS port of Bort's design language.
+   Hand-copied token snapshot from Bort/src/styles/global.css (Tailwind v4
+   @theme). Bort is reference-only and never imported (C17, ADR-022). */
+
+/* ---- self-hosted fonts (copied from Bort/public/fonts) ---- */
+@font-face {
+  font-family: "National Park";
+  src: url("/fonts/NationalPark-Regular.otf") format("opentype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Reglisse Fill";
+  src: url("/fonts/Reglisse_Fill.otf") format("opentype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---- Bort theme tokens (all 8 themes) ---- */
+:root,
+html[data-theme="latenightbath"] {
+  --base-text-color: #46425e;
+  --box-color-standard: #f69197;
+  --base-background-color: #ffeecc;
+  --base-bd-background-color: #ffc4b8;
+}
+html[data-theme="ayy4"] {
+  --base-text-color: #00303b;
+  --box-color-standard: #ffce96;
+  --base-background-color: #f1f2da;
+  --base-bd-background-color: #ff7777;
+}
+html[data-theme="curiosities"] {
+  --base-text-color: #46425e;
+  --box-color-standard: #ffb0a3;
+  --base-background-color: #ffeecc;
+  --base-bd-background-color: #46425e;
+}
+html[data-theme="sunnyswamp"] {
+  --base-text-color: #46425e;
+  --box-color-standard: #d1ad82;
+  --base-background-color: #dbd1b4;
+  --base-bd-background-color: #98a681;
+}
+html[data-theme="standard_og"] {
+  --base-text-color: #5e2bff;
+  --box-color-standard: #b1ede8;
+  --base-background-color: #fffcf9;
+  --base-bd-background-color: #ff6978;
+}
+html[data-theme="werwolvdark"] {
+  --base-text-color: #f3f4f4;
+  --box-color-standard: #686299;
+  --base-background-color: #1e2127;
+  --base-bd-background-color: #242424;
+}
+html[data-theme="trans"] {
+  --base-text-color: #55cdfc;
+  --box-color-standard: #b1ede8;
+  --base-background-color: #fffcf9;
+  --base-bd-background-color: #f7a8b8;
+}
+html[data-theme="nostalgia"] {
+  --base-text-color: #b8b5b9;
+  --box-color-standard: #53a788;
+  --base-background-color: #131620;
+  --base-bd-background-color: #181c28;
+}
+
+:root {
+  /* accent palette (Bort @theme snapshot) */
+  --phlox: #c04cfd;
+  --hot-pink: #fc6dab;
+  --cream: #f7f6c5;
+  --beige: #f3fae1;
+  --darkpurpleish: #310a31;
+  --greypurpleish: #847996;
+  --eggplant: #6d435a;
+
+  --font-bodyf: "National Park", "Helvetica", sans-serif;
+  --font-headerf: "Reglisse Fill", "Arial Black", sans-serif;
+}
+
+/* ---- base ---- */
+html, body {
+  margin: 0;
+  height: 100%;
+}
+body {
+  background: var(--base-bd-background-color);
+  color: var(--base-text-color);
+  font-family: var(--font-bodyf);
+}
+* {
+  box-sizing: border-box;
+}
+:focus-visible {
+  outline: 3px solid var(--phlox);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- Bort box recipe (Box.astro):
+   bg base-background, ring-4 box-color-standard, rounded-sm,
+   hard offset shadow (8px 8px, box color at 50%), generous min sizes ---- */
+.box {
+  background: var(--base-background-color);
+  color: var(--base-text-color);
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 4px var(--box-color-standard),
+    8px 8px 0 0 color-mix(in srgb, var(--box-color-standard) 50%, transparent);
+  padding: 0 12px 12px;
+  margin: 4px;
+  overflow-wrap: break-word;
+  overflow: hidden;
+}
+.box-title {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  background: var(--box-color-standard);
+  color: var(--base-background-color);
+  margin: 0 -12px;
+  padding: 4px 8px 8px;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+.title-label {
+  margin-right: auto;
+  font-family: var(--font-headerf);
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+.title-chrome {
+  opacity: 0.85;
+}
+
+/* ---- app layout: mobile-first, one-handed (C8) ---- */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 4px;
+}
+.header-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+.app-name {
+  font-family: var(--font-headerf);
+  font-weight: normal;
+  font-size: clamp(30px, 7vw, 44px);
+  line-height: 1;
+  margin: 0;
+  padding-top: 8px;
+}
+.header-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding-bottom: 4px;
+}
+.chip {
+  background: var(--base-background-color);
+  color: var(--base-text-color);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  min-height: 32px;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 60%, transparent);
+}
+.model-wrap {
+  max-width: 46vw;
+}
+.model-chip {
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+.fake-badge {
+  background: var(--hot-pink);
+  color: var(--cream);
+  box-shadow: none;
+}
+
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--box-color-standard) var(--base-bd-background-color);
+}
+
+/* ---- message boxes ---- */
+.msg {
+  min-height: 120px; /* Bort's generous min size */
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+}
+.msg-body {
+  flex: 1;
+  padding-top: 10px;
+  font-size: 17px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.msg.you {
+  align-self: flex-end;
+  --box-color-standard: var(--hot-pink); /* fixed accent, Bort-style */
+}
+.msg.error {
+  align-self: stretch;
+  --box-color-standard: var(--eggplant);
+}
+.msg.error .box-title {
+  color: var(--cream);
+}
+.retry-btn {
+  margin-top: 10px;
+}
+@media (min-width: 640px) {
+  .msg.you {
+    max-width: 75%;
+  }
+  .msg.kaeru {
+    max-width: 88%;
+  }
+}
+
+/* streaming cursor */
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--base-text-color);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cursor {
+    animation: none;
+  }
+}
+
+/* ---- composer ---- */
+.composer-box {
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+.composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  padding-top: 8px;
+  flex: 1;
+}
+#composer {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--base-text-color);
+  font: inherit;
+  font-size: 17px;
+  line-height: 1.4;
+  max-height: 30vh;
+  padding: 8px 4px;
+}
+#composer::placeholder {
+  opacity: 0.6;
+}
+.action-btn {
+  align-self: flex-end;
+  min-width: 72px;
+  min-height: 44px; /* one-finger target */
+  border: none;
+  border-radius: 4px;
+  background: var(--box-color-standard);
+  color: var(--base-background-color);
+  font-family: var(--font-headerf);
+  font-size: 17px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--box-color-standard) 50%, transparent);
+}
+.action-btn:active {
+  translate: 2px 2px;
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 50%, transparent);
+}
+.action-btn.stop {
+  background: var(--hot-pink);
+  color: var(--cream);
+  box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--hot-pink) 50%, transparent);
+}

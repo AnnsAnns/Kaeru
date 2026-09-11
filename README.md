@@ -7,7 +7,7 @@ LM Studio, vLLM, llama.cpp) with token-by-token streaming.
 
 The plan and architecture live in [`docs/arc42-architecture.md`](docs/arc42-architecture.md);
 implementation notes per milestone in [`docs/milestones/`](docs/milestones/).
-Status: **M2.5 (threads + Astro web client) code complete** — see
+Status: **M2.5 (threads + Markdown chat) code complete** — see
 [`docs/milestones/M2.5.md`](docs/milestones/M2.5.md). Earlier notes:
 [`docs/milestones/M2.md`](docs/milestones/M2.md),
 [`docs/milestones/M1.md`](docs/milestones/M1.md). Next up is **M3 — agent loop
@@ -16,16 +16,12 @@ Status: **M2.5 (threads + Astro web client) code complete** — see
 
 ## Quickstart
 
-The web UI is an **Astro** project that must be built before `cargo` (the
-single binary embeds `web/dist`; Node is never needed at runtime):
+One command: the UI is embedded in the binary, with no build step.
 
 ```sh
-npm ci --prefix crates/agent-web/web && npm run build --prefix crates/agent-web/web
 cargo run -p agent-web -- --fake   # keyless: boots the full UI on the fake provider
 # open http://127.0.0.1:8080
 ```
-
-Rebuilding after a `web/src/` change needs the Astro build *and* a `cargo build`.
 
 For a real provider, edit `data/config.toml` (created on first run):
 
@@ -68,8 +64,8 @@ in the browser. Long conversations stay within the deterministic prompt budget
 (`[context] max_prompt_tokens`, default 16000): the oldest turns are folded into
 a rolling summary (ADR-018) rather than dropped silently. Backup = copy `data/`.
 
-Assistant replies are Markdown, rendered in the browser to sanitized HTML
-(ADR-025); the API and core only ever carry raw text.
+Assistant replies are Markdown, rendered to sanitized HTML on the server
+(ADR-026); the raw Markdown is stored and the core only ever carries raw text.
 
 ## Security notes
 
@@ -86,8 +82,7 @@ Assistant replies are Markdown, rendered in the browser to sanitized HTML
 
 ```
 crates/agent-core/   library: config, events, LLM client (SSE), fake provider, conversations, context, ChatSession, ConversationRegistry
-crates/agent-web/    axum frontend: routes, SSE bridge, assets (rust-embed)
-crates/agent-web/web/ Astro web client (build-time only; compiled `dist/` is embedded)
+crates/agent-web/    axum frontend: routes, SSE bridge, markdown renderer, embedded UI (rust-embed)
 data/                created at runtime: config.toml, cassette.json, conversations/ (M4+ memory/, M5 sandbox/)
 Bort/                the owner's blog, visual design reference ONLY — never built or imported
 scripts/             dev tooling (mock provider server for local end-to-end runs)
@@ -96,8 +91,6 @@ scripts/             dev tooling (mock provider server for local end-to-end runs
 ## Development
 
 ```sh
-npm ci --prefix crates/agent-web/web && npm run build --prefix crates/agent-web/web
-npm test --prefix crates/agent-web/web   # client Markdown sanitization fixtures
 cargo test                       # full offline suite (fake provider, no network)
 cargo test -p agent-core         # core tests without compiling any frontend
 cargo fmt && cargo clippy --all-targets -- -D warnings

@@ -13,9 +13,12 @@
 //! races between the turn task and `abort` are resolved by turn-id guard:
 //! exactly one of them finalizes.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -49,6 +52,9 @@ struct SessionInner {
     title: Option<String>,
     /// RFC 3339 creation timestamp (persisted).
     created_at: String,
+    /// RFC 3339 last-write timestamp (persisted); re-stamped by the store on
+    /// every save (M2.5). Kept here so in-memory state round-trips honestly.
+    updated_at: String,
     model_override: Option<String>,
     next_turn_id: u64,
     active: Option<ActiveTurn>,
@@ -98,6 +104,7 @@ impl ChatSession {
             accumulated_usage: Usage::default(),
             title: None,
             created_at: crate::conversations::now_rfc3339(),
+            updated_at: crate::conversations::now_rfc3339(),
             model_override: None,
             next_turn_id: 1,
             active: None,
@@ -115,6 +122,9 @@ impl ChatSession {
                     inner.accumulated_usage = conversation.usage;
                     inner.title = conversation.title;
                     inner.created_at = conversation.created_at;
+                    if !conversation.updated_at.is_empty() {
+                        inner.updated_at = conversation.updated_at;
+                    }
                 }
                 Ok(None) => {}
                 Err(err) => tracing::warn!(
@@ -156,6 +166,19 @@ impl ChatSession {
     /// Set or clear (None) the per-conversation model override.
     pub fn set_model(&self, model: Option<String>) {
         self.lock().model_override = model;
+    }
+
+    /// Set the conversation title (M2.5: used when a thread is created with
+    /// one). A later first user message no longer overrides it.
+    pub fn set_title(&self, title: Option<String>) {
+        self.lock().title = title;
+    }
+
+    /// Force a write of the current conversation to the store; a no-op for an
+    /// ephemeral session. Used by the registry so a freshly created empty
+    /// thread shows up in listings immediately.
+    pub fn persist(&self) {
+        self.lock().persist();
     }
 
     /// Snapshot of the conversation history (the recent window; older turns
@@ -274,6 +297,147 @@ impl ChatSession {
     }
 }
 
+/// One row of the thread sidebar (M2.5): header fields only, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "messageCount")]
+    pub message_count: usize,
+    #[serde(default)]
+    pub usage: Usage,
+}
+
+/// Platform-agnostic cache of live sessions over the plain-file store
+/// (M2.5, §5.5 / ADR-024).
+///
+/// The UI calls conversations *threads*; the core keeps the term
+/// *conversation*. One `Arc<ChatSession>` is cached per conversation id and
+/// lazily loaded from disk, so an in-flight turn stays reachable across HTTP
+/// requests. Storage stays the source of truth: a restart rebuilds every
+/// thread from `data/conversations/`.
+pub struct ConversationRegistry {
+    core: Arc<AgentCore>,
+    store: ConversationStore,
+    sessions: Mutex<HashMap<String, Arc<ChatSession>>>,
+}
+
+impl ConversationRegistry {
+    pub fn new(core: Arc<AgentCore>, store: ConversationStore) -> Self {
+        Self {
+            core,
+            store,
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn store(&self) -> &ConversationStore {
+        &self.store
+    }
+
+    /// Sidebar rows, newest `updatedAt` first.
+    pub fn list(&self) -> Result<Vec<ThreadSummary>> {
+        let conversations = self.store.list()?;
+        Ok(conversations
+            .into_iter()
+            .map(|c| ThreadSummary {
+                id: c.id,
+                title: c.title,
+                created_at: c.created_at,
+                updated_at: c.updated_at,
+                message_count: c.messages.len(),
+                usage: c.usage,
+            })
+            .collect())
+    }
+
+    /// Create a new empty thread and persist it immediately so it appears in
+    /// listings before its first turn.
+    pub fn create(&self, title: Option<String>) -> Result<Arc<ChatSession>> {
+        let id = new_thread_id();
+        let session = Arc::new(ChatSession::with_store(
+            Arc::clone(&self.core),
+            id.clone(),
+            self.store.clone(),
+        ));
+        if title.is_some() {
+            session.set_title(title);
+        }
+        session.persist();
+        self.sessions
+            .lock()
+            .expect("registry lock poisoned")
+            .insert(id, Arc::clone(&session));
+        Ok(session)
+    }
+
+    /// The cached (or lazily loaded) session for `id`. An unknown id is
+    /// `ApiErrorKind::NotFound`.
+    pub fn get(&self, id: &str) -> Result<Arc<ChatSession>> {
+        if let Some(session) = self
+            .sessions
+            .lock()
+            .expect("registry lock poisoned")
+            .get(id)
+        {
+            return Ok(Arc::clone(session));
+        }
+        if self.store.load(id)?.is_none() {
+            return Err(ApiError::new(
+                ApiErrorKind::NotFound,
+                format!("no thread with id {id:?}"),
+            ));
+        }
+        let session = Arc::new(ChatSession::with_store(
+            Arc::clone(&self.core),
+            id.to_owned(),
+            self.store.clone(),
+        ));
+        let mut sessions = self.sessions.lock().expect("registry lock poisoned");
+        Ok(Arc::clone(sessions.entry(id.to_owned()).or_insert(session)))
+    }
+
+    /// The most recently updated thread, if any.
+    pub fn latest(&self) -> Result<Option<Arc<ChatSession>>> {
+        match self.store.list()?.into_iter().next() {
+            Some(conversation) => Ok(Some(self.get(&conversation.id)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Drop the session and remove its file. Deleting the selected thread is
+    /// the caller's cue to reselect (fresh or newest).
+    pub fn delete(&self, id: &str) -> Result<()> {
+        if let Some(session) = self
+            .sessions
+            .lock()
+            .expect("registry lock poisoned")
+            .remove(id)
+        {
+            // Stop a running turn first so it cannot re-create the file.
+            let _ = session.abort();
+        }
+        self.store.delete(id)
+    }
+}
+
+/// Thread id generator: no `uuid` dependency (C15). Nanoseconds since the
+/// epoch plus a process-local counter keeps ids unique and file-name-safe.
+fn new_thread_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("t{nanos:x}{counter:x}")
+}
+
 impl SessionInner {
     fn to_conversation(&self) -> Conversation {
         Conversation {
@@ -281,6 +445,7 @@ impl SessionInner {
             id: self.conversation_id.clone(),
             title: self.title.clone(),
             created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
             summary: self.summary.clone(),
             messages: self.history.iter().map(StoredMessage::from).collect(),
             usage: self.accumulated_usage,
@@ -925,6 +1090,7 @@ mod tests {
             accumulated_usage: Usage::default(),
             title: None,
             created_at: "1970-01-01T00:00:00Z".into(),
+            updated_at: "1970-01-01T00:00:00Z".into(),
             model_override: None,
             next_turn_id: 1,
             active: None,
@@ -1114,10 +1280,12 @@ mod tests {
         assert_eq!(session.total_usage().input_tokens, Some(4));
         assert_eq!(session.total_usage().output_tokens, Some(6));
 
-        // The file on disk carries the planned schema (Appendix C: schema: 1).
+        // The file on disk carries the planned schema (Appendix C: schema: 2,
+        // M2.5 added `updatedAt`).
         let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["schema"], 1);
+        assert_eq!(json["schema"], 2);
+        assert!(json["updatedAt"].is_string());
         assert_eq!(json["messages"].as_array().unwrap().len(), 2);
         assert_eq!(json["usage"]["total_tokens"], 10);
         std::fs::remove_dir_all(&dir).ok();
@@ -1150,5 +1318,109 @@ mod tests {
         assert_eq!(title.chars().count(), 61);
         assert!(title.ends_with('…'));
         assert_eq!(derive_title("   "), "untitled");
+    }
+
+    /* ---------- ConversationRegistry (M2.5, §5.5 / ADR-024) ---------- */
+
+    fn registry(name: &str) -> (ConversationRegistry, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kaeru-test-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let registry = ConversationRegistry::new(
+            core_with(FakeProvider::builtin()),
+            ConversationStore::new(&dir),
+        );
+        (registry, dir)
+    }
+
+    #[test]
+    fn registry_create_persists_an_empty_thread_and_lists_it() {
+        let (registry, dir) = registry("registry-create");
+        let session = registry.create(None).unwrap();
+        let id = session.conversation_id();
+        assert!(dir.join(format!("{id}.json")).is_file());
+
+        let listed = registry.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].message_count, 0);
+        assert!(listed[0].title.is_none());
+
+        // A named thread keeps its explicit title.
+        let named = registry.create(Some("My thread".into())).unwrap();
+        assert_eq!(named.title().as_deref(), Some("My thread"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_get_is_cached_and_unknown_ids_are_not_found() {
+        let (registry, dir) = registry("registry-get");
+        let created = registry.create(None).unwrap();
+        let id = created.conversation_id();
+
+        let fetched = registry.get(&id).unwrap();
+        assert!(Arc::ptr_eq(&created, &fetched), "session must be cached");
+
+        let err = registry.get("does-not-exist").err().unwrap();
+        assert_eq!(err.kind, ApiErrorKind::NotFound);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_delete_drops_the_session_and_the_file() {
+        let (registry, dir) = registry("registry-delete");
+        let session = registry.create(None).unwrap();
+        let id = session.conversation_id();
+
+        registry.delete(&id).unwrap();
+        assert!(!dir.join(format!("{id}.json")).exists());
+        assert!(registry.get(&id).is_err());
+        assert!(registry.list().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn stamp_updated_at(dir: &std::path::Path, id: &str, timestamp: &str) {
+        let path = dir.join(format!("{id}.json"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        json["updatedAt"] = serde_json::Value::String(timestamp.into());
+        std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn registry_picks_the_newest_thread_and_falls_back_after_delete() {
+        let (registry, dir) = registry("registry-latest");
+        assert!(registry.latest().unwrap().is_none());
+        let older = registry.create(None).unwrap();
+        let newer = registry.create(None).unwrap();
+        stamp_updated_at(&dir, &older.conversation_id(), "2020-01-01T00:00:00Z");
+        stamp_updated_at(&dir, &newer.conversation_id(), "2024-01-01T00:00:00Z");
+
+        let latest = registry.latest().unwrap().unwrap();
+        assert_eq!(latest.conversation_id(), newer.conversation_id());
+
+        registry.delete(&newer.conversation_id()).unwrap();
+        let latest = registry.latest().unwrap().unwrap();
+        assert_eq!(latest.conversation_id(), older.conversation_id());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn threads_keep_independent_histories() {
+        let dir = std::env::temp_dir().join(format!("kaeru-test-{}-threads", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let registry = ConversationRegistry::new(
+            core_with(FakeProvider::builtin()),
+            ConversationStore::new(&dir),
+        );
+
+        let a = registry.create(None).unwrap();
+        let b = registry.create(None).unwrap();
+        let handle = a.send("only in a").unwrap();
+        drain(handle.into_events()).await;
+
+        assert_eq!(a.history().len(), 2);
+        assert!(b.history().is_empty());
+        assert_eq!(registry.list().unwrap().len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

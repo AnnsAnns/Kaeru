@@ -32,7 +32,7 @@ pub use llm::{
     CASSETTE_VERSION, Cassette, ChatMessage, ChatRequest, ClientMode, FakeProvider, HttpClient,
     Interaction, LlmClient, ModelInfo, RecordingClient, Role,
 };
-pub use session::{ChatSession, TurnHandle};
+pub use session::{ChatSession, ConversationRegistry, ThreadSummary, TurnHandle};
 
 /// Shared core: configuration plus the provider client.
 ///

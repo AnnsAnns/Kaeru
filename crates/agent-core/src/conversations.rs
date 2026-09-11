@@ -16,7 +16,10 @@ use crate::events::Usage;
 use crate::llm::{ChatMessage, Role};
 
 /// The conversation file version this build reads and writes.
-pub const CONVERSATION_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (M2.5) adds `updatedAt`; v1 files are migrated on load by copying
+/// `createdAt` into `updatedAt`.
+pub const CONVERSATION_SCHEMA_VERSION: u32 = 2;
 
 /// One stored message. Mirrors [`ChatMessage`]; `tool_call_id` arrives with
 /// the agent loop (M3) but is part of the wire schema from day one.
@@ -57,6 +60,10 @@ pub struct Conversation {
     pub title: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// Last write timestamp; stamped by [`ConversationStore::save`] on every
+    /// change and used to order threads newest-first (M2.5).
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: String,
     /// Rolling summary of turns that fell out of the context window [M2].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -84,9 +91,14 @@ impl ConversationStore {
 
     /// Save atomically: write `{id}.json.tmp`, then rename over the target.
     /// A crash mid-save never leaves a half-written conversation behind.
+    ///
+    /// The store owns the clock: `updatedAt` is stamped here, on every write,
+    /// so the sidebar re-sorts naturally (M2.5, ADR-024).
     pub fn save(&self, conversation: &Conversation) -> Result<()> {
         validate_id(&conversation.id)?;
-        let text = serde_json::to_string_pretty(conversation)
+        let mut stamped = conversation.clone();
+        stamped.updated_at = now_rfc3339();
+        let text = serde_json::to_string_pretty(&stamped)
             .map_err(|e| ApiError::internal(format!("cannot serialize conversation: {e}")))?;
         std::fs::create_dir_all(&self.dir).map_err(|e| {
             ApiError::new(
@@ -143,6 +155,61 @@ impl ConversationStore {
         }
     }
 
+    /// All conversations in the store, newest `updatedAt` first (M2.5): the
+    /// sidebar listing. Files that fail to load are already quarantined by
+    /// [`ConversationStore::load`] and simply do not appear.
+    pub fn list(&self) -> Result<Vec<Conversation>> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "cannot read conversations dir {}: {e}",
+                    self.dir.display()
+                )));
+            }
+        };
+        let mut conversations = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                ApiError::internal(format!(
+                    "cannot read conversations dir {}: {e}",
+                    self.dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Foreign file names are skipped, not fatal (`load` would error).
+            if validate_id(id).is_err() {
+                continue;
+            }
+            if let Some(conversation) = self.load(id)? {
+                conversations.push(conversation);
+            }
+        }
+        // RFC 3339 UTC sorts lexicographically = chronologically.
+        conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(conversations)
+    }
+
+    /// Remove a conversation file. Missing files are a no-op (idempotent).
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let path = self.path_for(id)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ApiError::internal(format!(
+                "cannot delete {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     fn path_for(&self, id: &str) -> Result<PathBuf> {
         validate_id(id)?;
         Ok(self.dir.join(format!("{id}.json")))
@@ -165,27 +232,63 @@ impl ConversationStore {
     }
 }
 
-/// Migration hook (§5.4): unknown `schema` values are a load error (which the
-/// store turns into a quarantine). Future versions chain `schema: n → n+1`
-/// steps here; today only version 1 exists.
+/// Migration hook (§5.4): older `schema` values are upgraded in place, newer
+/// or malformed ones are a load error (which the store turns into a
+/// quarantine). Today it chains `1 → 2` (adds `updatedAt`); future versions
+/// append steps here.
 fn migrate(text: &str) -> Result<Conversation> {
-    let conversation: Conversation = serde_json::from_str(text).map_err(|e| {
+    let mut value: serde_json::Value = serde_json::from_str(text).map_err(|e| {
         ApiError::new(
             ApiErrorKind::Internal,
             format!("not a valid conversation file: {e}"),
         )
     })?;
-    if conversation.schema == CONVERSATION_SCHEMA_VERSION {
-        Ok(conversation)
-    } else {
-        Err(ApiError::new(
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| ApiError::internal("conversation file has no schema version"))?
+        as u32;
+    if schema == 0 {
+        return Err(ApiError::internal(
+            "schema version 0 is not a valid conversation",
+        ));
+    }
+    if schema > CONVERSATION_SCHEMA_VERSION {
+        return Err(ApiError::new(
             ApiErrorKind::Internal,
             format!(
-                "schema version {} is unknown (this build speaks {CONVERSATION_SCHEMA_VERSION})",
-                conversation.schema
+                "schema version {schema} is unknown (this build speaks {CONVERSATION_SCHEMA_VERSION})"
             ),
-        ))
+        ));
     }
+    if schema < 2 {
+        migrate_v1_to_v2(&mut value);
+    }
+    serde_json::from_value(value).map_err(|e| {
+        ApiError::new(
+            ApiErrorKind::Internal,
+            format!("not a valid conversation file: {e}"),
+        )
+    })
+}
+
+/// v1 → v2: add `updatedAt`, seeded from `createdAt` when absent, and bump the
+/// schema marker. No data is lost: message bodies and usage are untouched.
+fn migrate_v1_to_v2(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("updatedAt")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        let created_at = object
+            .get("createdAt")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        object.insert("updatedAt".into(), created_at);
+    }
+    object.insert("schema".into(), serde_json::json!(2));
 }
 
 /// Conversation ids become file names: keep them to plain `[A-Za-z0-9_-]`
@@ -258,6 +361,7 @@ mod tests {
             id: id.into(),
             title: Some("hello".into()),
             created_at: rfc3339_from_unix(1_000_000_000),
+            updated_at: rfc3339_from_unix(1_000_000_000),
             summary: None,
             messages: vec![
                 StoredMessage::from(&ChatMessage::user("hello")),
@@ -276,8 +380,11 @@ mod tests {
         let (store, dir) = temp_store("round-trip");
         store.save(&sample("default")).unwrap();
         let loaded = store.load("default").unwrap().unwrap();
-        assert_eq!(loaded, sample("default"));
+        assert_eq!(loaded.messages, sample("default").messages);
         assert_eq!(loaded.messages[0].to_chat(), ChatMessage::user("hello"));
+        // `save` stamps a fresh `updatedAt` (the store owns the clock).
+        assert_ne!(loaded.updated_at, sample("default").updated_at);
+        assert!(loaded.updated_at > loaded.created_at);
         assert!(store.load("missing").unwrap().is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -288,13 +395,91 @@ mod tests {
         store.save(&sample("default")).unwrap();
         let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["schema"], 1);
+        assert_eq!(json["schema"], 2);
         assert_eq!(json["id"], "default");
         assert_eq!(json["createdAt"], "2001-09-09T01:46:40Z");
+        assert!(
+            json["updatedAt"].as_str().unwrap() > "2001-09-09T01:46:40Z",
+            "save must stamp a fresh updatedAt"
+        );
         assert_eq!(json["summary"], serde_json::Value::Null);
         assert_eq!(json["messages"][0]["role"], "user");
         assert_eq!(json["messages"][0]["content"], "hello");
         assert_eq!(json["usage"]["input_tokens"], 10);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_v1_file_migrates_to_v2_with_no_data_loss() {
+        let (store, dir) = temp_store("migrate-v1");
+        // A v1 file: schema 1, no `updatedAt` field at all.
+        let v1 = serde_json::json!({
+            "schema": 1,
+            "id": "default",
+            "title": "old thread",
+            "createdAt": "2001-09-09T01:46:40Z",
+            "summary": null,
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "Hello!"}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        std::fs::write(
+            dir.join("default.json"),
+            serde_json::to_string_pretty(&v1).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.load("default").unwrap().unwrap();
+        assert_eq!(loaded.schema, 2);
+        assert_eq!(loaded.updated_at, "2001-09-09T01:46:40Z");
+        assert_eq!(loaded.created_at, "2001-09-09T01:46:40Z");
+        assert_eq!(loaded.title.as_deref(), Some("old thread"));
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.usage.input_tokens, Some(10));
+        // Not quarantined: the file stays in place.
+        assert!(dir.join("default.json").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_returns_threads_newest_first() {
+        let (store, dir) = temp_store("list");
+        // Write directly so the distinct timestamps survive (save stamps now).
+        let mut older = sample("older");
+        older.updated_at = "2020-01-01T00:00:00Z".into();
+        let mut newer = sample("newer");
+        newer.updated_at = "2024-01-01T00:00:00Z".into();
+        for conversation in [older, newer] {
+            std::fs::write(
+                dir.join(format!("{}.json", conversation.id)),
+                serde_json::to_string_pretty(&conversation).unwrap(),
+            )
+            .unwrap();
+        }
+        let listed: Vec<String> = store.list().unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(listed, vec!["newer".to_owned(), "older".to_owned()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_skips_foreign_files_and_is_empty_when_absent() {
+        let (store, dir) = temp_store("list-foreign");
+        assert!(store.list().unwrap().is_empty());
+        std::fs::write(dir.join("notes.txt"), "not a conversation").unwrap();
+        std::fs::write(dir.join("bad id.json"), "{}").unwrap();
+        assert!(store.list().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_removes_the_file_and_is_idempotent() {
+        let (store, dir) = temp_store("delete");
+        store.save(&sample("default")).unwrap();
+        store.delete("default").unwrap();
+        assert!(!dir.join("default.json").exists());
+        store.delete("default").unwrap(); // missing is a no-op
         std::fs::remove_dir_all(&dir).ok();
     }
 

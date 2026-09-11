@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiErrorKind, Result};
 use crate::events::Usage;
-use crate::llm::{ChatMessage, Role};
+use crate::llm::{ChatMessage, Role, ToolCall};
 
 /// The conversation file version this build reads and writes.
 ///
@@ -21,8 +21,9 @@ use crate::llm::{ChatMessage, Role};
 /// `createdAt` into `updatedAt`.
 pub const CONVERSATION_SCHEMA_VERSION: u32 = 2;
 
-/// One stored message. Mirrors [`ChatMessage`]; `tool_call_id` arrives with
-/// the agent loop (M3) but is part of the wire schema from day one.
+/// One stored message. Mirrors [`ChatMessage`]; the agent-loop fields
+/// (`toolCallId`, `toolCalls`) arrive with M3 and are optional/backward
+/// compatible — older files simply lack them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub role: Role,
@@ -33,6 +34,9 @@ pub struct StoredMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub tool_call_id: Option<String>,
+    /// Tool calls the assistant requested (M3).
+    #[serde(rename = "toolCalls", default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
     /// Model thinking for this turn (display-only); absent on older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
@@ -43,7 +47,8 @@ impl From<&ChatMessage> for StoredMessage {
         Self {
             role: message.role,
             content: message.content.clone(),
-            tool_call_id: None,
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls: message.tool_calls.clone(),
             reasoning: message.reasoning.clone(),
         }
     }
@@ -53,6 +58,8 @@ impl StoredMessage {
     pub fn to_chat(&self) -> ChatMessage {
         let mut message = ChatMessage::new(self.role, self.content.clone());
         message.reasoning = self.reasoning.clone();
+        message.tool_call_id = self.tool_call_id.clone();
+        message.tool_calls = self.tool_calls.clone();
         message
     }
 }

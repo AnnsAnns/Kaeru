@@ -70,6 +70,9 @@ pub fn router(state: AppState) -> Router {
         .route("/models", get(get_models))
         .route("/chat", post(post_chat))
         .route("/abort", post(post_abort))
+        .route("/regenerate", post(post_regenerate))
+        .route("/stream", get(get_stream))
+        .route("/approval", post(post_approval))
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route_layer(middleware::from_fn_with_state(
@@ -144,6 +147,15 @@ struct ThreadQuery {
     thread: Option<String>,
 }
 
+/// Consent decision for a pending `ApprovalRequest` (M3).
+#[derive(Debug, Deserialize)]
+struct ApprovalBody {
+    id: String,
+    decision: agent_core::Decision,
+    #[serde(default)]
+    thread: Option<String>,
+}
+
 /* ---------- helpers ---------- */
 
 fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
@@ -160,7 +172,9 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
                 "role": message.role,
                 "content": message.content,
                 "html": html,
-                "reasoning": message.reasoning
+                "reasoning": message.reasoning,
+                "tool_calls": message.tool_calls,
+                "tool_call_id": message.tool_call_id
             })
         })
         .collect();
@@ -272,6 +286,54 @@ async fn post_abort(State(state): State<AppState>, Query(query): Query<ThreadQue
         // Idempotent: aborting an idle/absent thread is a no-op, not an error.
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => error::api_error(&err),
+    }
+}
+
+/// Re-run the last user message for a thread (M3), dropping its old answer.
+async fn post_regenerate(
+    State(state): State<AppState>,
+    Query(query): Query<ThreadQuery>,
+) -> Response {
+    let session = match resolve_thread(&state, query.thread.as_deref()) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    match session.regenerate() {
+        Ok(handle) => bridge::sse_response(handle.into_events()),
+        Err(err) => error::api_error(&err),
+    }
+}
+
+/// Re-attach to a thread's active turn: replays the buffered events then
+/// streams live (M3, §6.3a). 204 when the thread has no active turn.
+async fn get_stream(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+    let session = match resolve_existing(&state, query.thread.as_deref()) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    match session {
+        Some(session) if session.is_active() => bridge::sse_response(session.subscribe()),
+        _ => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+/// Resolve a pending consent card (M3). Unknown ids (already resolved or
+/// timed out) are a plain 404.
+async fn post_approval(State(state): State<AppState>, Json(body): Json<ApprovalBody>) -> Response {
+    let session = match resolve_existing(&state, body.thread.as_deref()) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    let Some(session) = session else {
+        return error::json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no thread to approve for",
+        );
+    };
+    match session.approve(&body.id, body.decision).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => thread_error(&err),
     }
 }
 
@@ -755,5 +817,52 @@ mod tests {
         assert_eq!(json["history"].as_array().unwrap().len(), 2);
         let (_, json, _) = get_json(&state, &format!("/api/threads/{b}"), HeaderMap::new()).await;
         assert_eq!(json["history"].as_array().unwrap().len(), 0);
+    }
+
+    /* ---------- M3 endpoints ---------- */
+
+    #[tokio::test]
+    async fn approval_for_an_unknown_request_is_404() {
+        let state = AppState::fake();
+        let thread = state.registry.create(None).unwrap().conversation_id();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/approval",
+            Some(&json!({ "id": "appr1", "decision": "allow", "thread": thread })),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_is_204_when_no_turn_is_active() {
+        let state = AppState::fake();
+        let thread = state.registry.create(None).unwrap().conversation_id();
+        let response = request(
+            &state,
+            axum::http::Method::GET,
+            &format!("/api/stream?thread={thread}"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn regenerate_without_a_previous_answer_is_a_config_error() {
+        let state = AppState::fake();
+        let thread = state.registry.create(None).unwrap().conversation_id();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            &format!("/api/regenerate?thread={thread}"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

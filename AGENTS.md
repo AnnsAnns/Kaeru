@@ -33,9 +33,9 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 ## Layout
 
 ```
-crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error
+crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers), tools, search, audit
 crates/agent-web/      axum binary: main.rs (CLI), routes.rs, bridge.rs, error.rs, assets.rs, markdown.rs, assets/ (embedded UI)
-data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json
+data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
 ```
@@ -71,15 +71,17 @@ The roadmap is staged; variants and stubs exist on purpose. Do not implement
 later-milestone features opportunistically, and don't "clean up" intentional
 stubs. Examples:
 
-- `CoreEvent` is the full enum from day one, but M1/M2/M2.5 use only
-  `Delta`/`TurnDone`/`Error`; `ToolCall`/`ToolResult`/`ApprovalRequest` arrive
-  with the M3 agent loop, `Artifact` with M5 files.
-- `ChatSession::approve` is a documented stub returning an error until M3.
-- `EventStream` is a live `broadcast` tap; bounded replay for reconnects is
-  M3. M1 semantics: a dropped subscriber aborts the turn.
-- **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox;
-  a mid-turn thread switch still cancels the turn (M3's executor removes it).
-- Don't add protocol fields "now that we're here" — stage them.
+- `CoreEvent` is the full enum from day one; M3 uses `Delta`/`Reasoning`/
+  `ToolCall`/`ToolResult`/`ApprovalRequest`/`TurnDone`/`Error`; `Artifact`
+  arrives with M5 files. Don't add protocol fields "now that we're here" —
+  stage them.
+- **M3** added the bounded tool loop, `web_search`, the tool-free summarizer
+  worker, the audit log, consent middleware and the disconnect-surviving turn
+  executor. Memory (the read/search/tag side, budgeted injection, the UI
+  browser, the distiller worker) is **M4**; `MemoryStore` ships only its write
+  side now so the consent gate is real — do not build the M4 side early. The
+  Python sandbox is M5.
+- **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
 When you complete milestone work, update the matching `docs/milestones/Mx.md`
 notes (the repo treats those as the decision log); significant design changes
@@ -96,8 +98,21 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   doc-fixed. The frontend renders it as "stopped", not an error card.
 - **Turn/abort race:** `abort()` flushes partial text under the session mutex
   and the turn finalizer is id-guarded (`turn_id` must still be current), so
-  history flushes exactly once. A rare late delta after the aborted event is
-  known and accepted until M3's serialized emitter.
+  history flushes exactly once. M3's `Emitter` serializes emission (buffer +
+  broadcast) and the aborted `Error { kind: Aborted }` is the last event, so the
+  old late-delta window is closed.
+- **M3 turn executor:** a turn runs in a background task that survives a dropped
+  subscriber. `agent::Emitter` appends every event to a bounded `VecDeque`
+  (`TURN_BUFFER_CAPACITY`) *and* broadcasts it; `ChatSession::subscribe()`
+  replays the buffer then follows live (`GET /api/stream`). A broadcast with no
+  subscribers is not an error — never treat `send` failure as a disconnect.
+- **M3 agent loop:** `agent/loop.rs` owns the provider calls, tool execution,
+  consent and fencing; it returns the turn's new messages + usage and the
+  id-guarded session `finalize_turn` commits them (abort/complete flush once).
+  Every tool output re-entering the model is wrapped by `agent::fence`
+  (`<untrusted-data>`); consent is a `oneshot` keyed by an `ApprovalRequest` id
+  (`ChatSession::approve`), fail-closed on timeout. `web_search` reads raw pages
+  **only** through the tool-free summarizer worker (C16/ADR-021).
 - **Retry semantics:** on provider failure with zero assistant output the
   trailing user message is popped so retry doesn't duplicate it. Failure
   *after* partial output keeps everything (retry then duplicates the user

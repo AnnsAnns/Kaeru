@@ -18,7 +18,10 @@ mod routes;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_core::{AgentCore, ClientMode, Config, ConversationRegistry, ConversationStore, Paths};
+use agent_core::{
+    AgentCore, AuditLog, ClientMode, Config, ConversationRegistry, ConversationStore, MemoryStore,
+    Paths, ToolRegistry,
+};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
@@ -120,7 +123,13 @@ fn main() {
     }
 
     let core = match AgentCore::connect(config.clone(), mode) {
-        Ok(core) => Arc::new(core),
+        Ok(core) => Arc::new(
+            core.with_tools(ToolRegistry::with_defaults(
+                config.search.max_results,
+                Some(MemoryStore::new(cli.paths.memory.clone())),
+            ))
+            .with_audit(AuditLog::new(cli.paths.audit.clone())),
+        ),
         Err(err) => {
             eprintln!("cannot start provider client: {err}");
             std::process::exit(1);
@@ -183,6 +192,23 @@ fn banner(cli: &Cli, config: &Config, state: &AppState) {
         config.provider.base_url, config.provider.model
     );
     println!("  mode       : {mode}");
+    let search = match config.search.kind() {
+        agent_core::SearchProviderKind::Off => {
+            "off (set [search] provider to enable web_search)".to_owned()
+        }
+        kind => format!("{kind:?}"),
+    };
+    println!("  search     : {search}");
+    println!("  tools      : {}", state.core.tools().len());
+    println!(
+        "  audit      : {}",
+        state
+            .core
+            .audit()
+            .path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "disabled".into())
+    );
     println!("  auth       : {auth}");
     println!(
         "  history    : {} (survives restarts)",

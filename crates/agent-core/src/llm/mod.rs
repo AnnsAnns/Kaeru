@@ -9,7 +9,7 @@ pub mod types;
 
 pub use client::{ChatFuture, HttpClient, LlmClient, ModelsFuture};
 pub use fake::{CASSETTE_VERSION, Cassette, FakeProvider, Interaction, RecordingClient};
-pub use types::{ChatMessage, ChatRequest, ModelInfo, Role};
+pub use types::{ChatMessage, ChatRequest, ModelInfo, Role, ToolCall};
 
 use std::path::PathBuf;
 use std::sync::Arc;

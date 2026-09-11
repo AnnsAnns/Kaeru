@@ -7,12 +7,12 @@ LM Studio, vLLM, llama.cpp) with token-by-token streaming.
 
 The plan and architecture live in [`docs/arc42-architecture.md`](docs/arc42-architecture.md);
 implementation notes per milestone in [`docs/milestones/`](docs/milestones/).
-Status: **M2.5 (threads + Markdown chat) code complete** — see
-[`docs/milestones/M2.5.md`](docs/milestones/M2.5.md). Earlier notes:
+Status: **M3 (agent loop + web search) code complete** — see
+[`docs/milestones/M3.md`](docs/milestones/M3.md). Earlier notes:
+[`docs/milestones/M2.5.md`](docs/milestones/M2.5.md),
 [`docs/milestones/M2.md`](docs/milestones/M2.md),
-[`docs/milestones/M1.md`](docs/milestones/M1.md). Next up is **M3 — agent loop
-+ web search** (planned in
-[`docs/arc42-architecture.md`](docs/arc42-architecture.md) §1.3).
+[`docs/milestones/M1.md`](docs/milestones/M1.md). Next up is **M4 — memory**
+(planned in [`docs/arc42-architecture.md`](docs/arc42-architecture.md) §1.3).
 
 ## Quickstart
 
@@ -33,6 +33,14 @@ auth_token = ""            # set a long random value before exposing via a tunne
 base_url = "https://openrouter.ai/api/v1"   # or http://127.0.0.1:11434/v1 for Ollama, ...
 api_key  = "sk-or-v1-..."                   # empty for local servers that need no auth
 model    = "openai/gpt-4o-mini"
+
+[search]                   # web_search tool (M3); "off" disables it
+provider = "off"           # "off" | "brave" | "tavily" | "searxng"
+api_key  = ""              # brave/tavily
+base_url = ""              # searxng, e.g. http://127.0.0.1:8888
+
+[workers.summarizer]       # tool-free model that distills fetched pages (M3/ADR-021)
+model = ""                 # empty = provider default
 ```
 
 ```sh
@@ -67,6 +75,25 @@ a rolling summary (ADR-018) rather than dropped silently. Backup = copy `data/`.
 Assistant replies are Markdown, rendered to sanitized HTML on the server
 (ADR-026); the raw Markdown is stored and the core only ever carries raw text.
 
+## Tools & web search
+
+The model can call **tools**; a bounded loop (`[agent] max_steps`, default 8)
+runs them and feeds the results back until it answers.
+
+- **`web_search`** (enable with `[search] provider`): fetches the top pages and
+  returns a **distilled, cited summary**. A tool-free **summarizer worker** — its
+  own model from `[workers.summarizer]` — reads the raw pages; raw page text
+  never enters the main model's context (ADR-021).
+- **`memory_write`** always asks for consent first (one tap in the UI): memory
+  persists across sessions, so a silent write would be a prompt-injection vector
+  (ADR-016).
+
+Tool outputs are **fenced as untrusted data** before the model sees them, every
+tool execution and consent decision is appended to `data/audit.jsonl`, and the
+UI shows collapsible tool steps plus allow/deny consent cards. Turns survive a
+dropped connection: reloading the page re-attaches to a running turn and replays
+it (§6.3a). The **↻** button regenerates the last answer.
+
 ## Security notes
 
 - The provider API key lives **only** in `data/config.toml` (written with
@@ -81,9 +108,9 @@ Assistant replies are Markdown, rendered to sanitized HTML on the server
 ## Layout
 
 ```
-crates/agent-core/   library: config, events, LLM client (SSE), fake provider, conversations, context, ChatSession, ConversationRegistry
+crates/agent-core/   library: config, events, LLM client (SSE), fake provider, conversations, context, ChatSession, ConversationRegistry, agent loop, tools, search, workers, audit
 crates/agent-web/    axum frontend: routes, SSE bridge, markdown renderer, embedded UI (rust-embed)
-data/                created at runtime: config.toml, cassette.json, conversations/ (M4+ memory/, M5 sandbox/)
+data/                created at runtime: config.toml, cassette.json, conversations/, audit.jsonl, memory/ (M4+ sandbox/)
 Bort/                the owner's blog, visual design reference ONLY — never built or imported
 scripts/             dev tooling (mock provider server for local end-to-end runs)
 ```

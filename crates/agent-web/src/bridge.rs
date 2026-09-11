@@ -10,7 +10,6 @@ use axum::http::header;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::BroadcastStream;
 
 /// Interval for the SSE comment heartbeat; keeps intermediate proxies (later:
 /// cloudflared, M2) from buffering idle streams.
@@ -23,14 +22,11 @@ pub fn to_sse_event(event: &CoreEvent) -> Event {
 }
 
 /// Wrap a session event stream as an SSE response (`Cache-Control: no-store`).
+///
+/// The stream is an [`EventStream`] (M3): for an active turn it replays the
+/// buffered events first, then follows live, so a reconnect resumes mid-turn.
 pub fn sse_response(events: EventStream) -> Response {
-    let stream = BroadcastStream::new(events).filter_map(|item| match item {
-        Ok(event) => Some(Ok::<Event, Infallible>(to_sse_event(&event))),
-        Err(lagged) => {
-            tracing::warn!(target: "agent_web::bridge", "sse subscriber lagged by {lagged} events");
-            None
-        }
-    });
+    let stream = events.filter_map(|event| Some(Ok::<Event, Infallible>(to_sse_event(&event))));
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::default().interval(KEEP_ALIVE).text("keep-alive"))
         .into_response();

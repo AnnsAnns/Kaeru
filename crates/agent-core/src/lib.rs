@@ -4,44 +4,62 @@
 //! and translate `CoreEvent`s into platform idioms. No frontend concept (HTTP,
 //! HTML, Discord) is allowed in here (C2, ADR-010).
 //!
-//! M1 surface: config, the OpenAI-compatible client seam (real/fake/record),
-//! and the decoupled `ChatSession` turn executor. Later milestones add tools
-//! (M3), memory (M4), and the sandbox (M5) — see `docs/arc42-architecture.md`.
+//! Surface: config, the OpenAI-compatible client seam (real/fake/record), the
+//! decoupled `ChatSession` turn executor, and (M3) the tool-calling agent loop
+//! with web search, workers, the audit log and consent. Later milestones add
+//! memory (M4) and the sandbox (M5) — see `docs/arc42-architecture.md`.
 
+pub mod agent;
+pub mod audit;
 pub mod config;
 pub mod context;
 pub mod conversations;
 pub mod error;
 pub mod events;
 pub mod llm;
+pub mod search;
 pub mod session;
+pub mod tools;
 
 use std::sync::Arc;
 
+pub use agent::{TurnOutcome, WorkerSpec, Workers};
+pub use audit::{AuditEntry, AuditLog};
 pub use config::{
-    Config, ContextConfig, DEFAULT_BASE_URL, DEFAULT_MAX_PROMPT_TOKENS, DEFAULT_MODEL,
-    DEFAULT_PORT, Paths, ProviderConfig,
+    AgentConfig, Config, ContextConfig, DEFAULT_BASE_URL, DEFAULT_MAX_PROMPT_TOKENS, DEFAULT_MODEL,
+    DEFAULT_PORT, Paths, ProviderConfig, SearchConfig, SearchProviderKind, WorkerConfig,
+    WorkersConfig,
 };
 pub use context::ContextPolicy;
 pub use conversations::{
     CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredMessage,
 };
 pub use error::{ApiError, ApiErrorKind, Result};
-pub use events::{ApprovalKind, CoreEvent, Decision, EventStream, Risk, Usage};
+pub use events::{
+    ApprovalFuture, ApprovalKind, ApprovalSink, CoreEvent, Decision, DenyAll, EventStream, Risk,
+    Usage,
+};
 pub use llm::{
     CASSETTE_VERSION, Cassette, ChatMessage, ChatRequest, ClientMode, FakeProvider, HttpClient,
-    Interaction, LlmClient, ModelInfo, RecordingClient, Role,
+    Interaction, LlmClient, ModelInfo, RecordingClient, Role, ToolCall,
 };
+pub use search::{DisabledSearch, FakeSearch, SearchProvider, SearchResult};
 pub use session::{ChatSession, ConversationRegistry, ThreadSummary, TurnHandle};
+pub use tools::{MemoryStore, Tool, ToolContext, ToolRegistry};
 
-/// Shared core: configuration plus the provider client.
+/// Shared core: configuration, the provider client, the tool registry, the
+/// search provider, the worker registry, and the audit log.
 ///
-/// Built through [`AgentCore::connect`] which wires the client for the
-/// requested [`ClientMode`] (live / fake / record).
+/// Built through [`AgentCore::connect`] (wires workers + search from config)
+/// and refined by the frontend with the `with_*` builders (tools, audit).
 pub struct AgentCore {
     config: Config,
     client: Arc<dyn LlmClient>,
     mode: ClientMode,
+    tools: ToolRegistry,
+    search: Arc<dyn SearchProvider>,
+    workers: Arc<Workers>,
+    audit: AuditLog,
 }
 
 impl AgentCore {
@@ -50,23 +68,45 @@ impl AgentCore {
     }
 
     /// Like [`AgentCore::new`], but with an explicit mode (e.g. tests that
-    /// inject a `FakeProvider` while reporting `is_fake` truthfully).
+    /// inject a `FakeProvider` while reporting `is_fake` truthfully). No tools
+    /// are registered; call [`AgentCore::with_tools`] for the M3 set.
     pub fn with_mode(config: Config, client: Arc<dyn LlmClient>, mode: ClientMode) -> Self {
+        let workers = Arc::new(Workers::from_config(
+            Arc::clone(&client),
+            &config.provider.model,
+            &config.workers,
+        ));
         Self {
             config,
             client,
             mode,
+            tools: ToolRegistry::new(),
+            search: Arc::new(DisabledSearch),
+            workers,
+            audit: AuditLog::disabled(),
         }
     }
 
-    /// Build the core with the client appropriate for `mode`.
+    /// Build the core with the client appropriate for `mode`. Wires the worker
+    /// registry and the configured search provider; tools and the audit log are
+    /// added by the frontend (they need runtime paths).
     pub fn connect(config: Config, mode: ClientMode) -> Result<Self> {
         let client =
             llm::connect_client(&mode, &config.provider.base_url, &config.provider.api_key)?;
+        let search = search::from_config(&config.search);
+        let workers = Arc::new(Workers::from_config(
+            Arc::clone(&client),
+            &config.provider.model,
+            &config.workers,
+        ));
         Ok(Self {
             config,
             client,
             mode,
+            tools: ToolRegistry::new(),
+            search,
+            workers,
+            audit: AuditLog::disabled(),
         })
     }
 
@@ -82,8 +122,53 @@ impl AgentCore {
         &self.mode
     }
 
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
+    pub fn search(&self) -> &dyn SearchProvider {
+        self.search.as_ref()
+    }
+
+    pub fn workers(&self) -> &Workers {
+        &self.workers
+    }
+
+    pub fn audit(&self) -> &AuditLog {
+        &self.audit
+    }
+
+    /// Replace the tool registry (the M3 default set: web_search, memory_write).
+    pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Replace the search provider.
+    pub fn with_search(mut self, search: Arc<dyn SearchProvider>) -> Self {
+        self.search = search;
+        self
+    }
+
+    /// Replace the audit log.
+    pub fn with_audit(mut self, audit: AuditLog) -> Self {
+        self.audit = audit;
+        self
+    }
+
     /// True when the session runs on the fake provider (keyless dev / tests).
     pub fn is_fake(&self) -> bool {
         matches!(self.mode, ClientMode::Fake { .. })
+    }
+
+    /// The `ToolContext` a turn's tools run with.
+    pub fn tool_context(&self, turn_id: u64) -> ToolContext {
+        ToolContext {
+            client: Arc::clone(&self.client),
+            search: Arc::clone(&self.search),
+            workers: Arc::clone(&self.workers),
+            audit: self.audit.clone(),
+            turn_id,
+        }
     }
 }

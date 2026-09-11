@@ -11,6 +11,7 @@
   const composerEl = $("composer");
   const sendBtn = $("send-btn");
   const stopBtn = $("stop-btn");
+  const regenBtn = $("regen-btn");
   const themeBtn = $("theme-btn");
   const themeNameEl = $("theme-name");
   const modelSelect = $("model-select");
@@ -314,7 +315,7 @@
       box.body.textContent = payload.summary;
     }
     for (const message of payload.history || []) {
-      renderMessage(message.role, message.content, message.html, message.reasoning);
+      renderMessage(message);
     }
     if ((payload.history || []).length || payload.summary) {
       scrollToBottom(true);
@@ -322,6 +323,10 @@
       showEmptyHint();
     }
     renderThreadList();
+    // A turn may still be running server-side: re-attach and replay it (M3).
+    if (payload.active) {
+      attachStream().catch(() => {});
+    }
   }
 
   /* Model thinking: a collapsible block above the answer. Shown live while a
@@ -339,19 +344,38 @@
     return details;
   }
 
-  function renderMessage(role, content, html, reasoning) {
+  function renderMessage(message) {
+    const role = message.role;
+    // Tool results (M3) render as their own compact card, not a chat bubble.
+    if (role === "tool") {
+      const box = addBox("tool", "🔧 tool result");
+      const pre = document.createElement("pre");
+      pre.className = "tool-body";
+      pre.textContent = message.content || "";
+      box.body.append(pre);
+      return box;
+    }
     const mine = role === "user";
     const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
     if (mine) {
-      box.body.textContent = content;
-    } else if (html) {
+      box.body.textContent = message.content;
+    } else if (message.html) {
       box.body.classList.add("markdown");
-      box.body.innerHTML = html;
+      box.body.innerHTML = message.html;
     } else {
-      box.body.textContent = content;
+      box.body.textContent = message.content;
     }
-    if (!mine && reasoning) {
-      box.body.prepend(thinkingBlock(reasoning, false));
+    if (!mine && message.reasoning) {
+      box.body.prepend(thinkingBlock(message.reasoning, false));
+    }
+    // The assistant's tool requests (M3) show as collapsed steps below.
+    if (!mine && Array.isArray(message.tool_calls)) {
+      const steps = document.createElement("div");
+      steps.className = "steps";
+      for (const call of message.tool_calls) {
+        steps.append(toolCardFromCall(call));
+      }
+      box.body.append(steps);
     }
     return box;
   }
@@ -401,6 +425,100 @@
     sendBtn.hidden = busy;
     stopBtn.hidden = !busy;
     sendBtn.disabled = busy;
+    regenBtn.disabled = busy;
+  }
+
+  /* A fresh assistant box wired for streaming: thinking block, live text,
+     a steps container (tool + approval cards), and a caret. */
+  function newTurnView(label) {
+    const ai = addBox("kaeru", label || "kaeru");
+    const thinking = thinkingBlock("", true);
+    thinking.hidden = true;
+    const thinkingBody = thinking.querySelector(".thinking-body");
+    const textNode = document.createTextNode("");
+    const steps = document.createElement("div");
+    steps.className = "steps";
+    const cursor = document.createElement("span");
+    cursor.className = "cursor";
+    ai.body.append(thinking, textNode, steps, cursor);
+    const turn = {
+      ai,
+      thinking,
+      thinkingBody,
+      textNode,
+      steps,
+      cursor,
+      cards: {},
+      text: "",
+      reasoning: "",
+      usage: null,
+      terminal: false,
+      errorMsg: null,
+      aborted: false,
+    };
+    turn.paint = () => {
+      if (turn.reasoning) {
+        thinking.hidden = false;
+        thinkingBody.textContent = turn.reasoning;
+      }
+      textNode.data = turn.text;
+      scrollToBottom();
+    };
+    return turn;
+  }
+
+  /* Read an SSE response body into the turn view until a terminal event. */
+  async function readStream(response, turn) {
+    const parseChunk = createSseParser();
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const data of parseChunk(decoder.decode(value, { stream: true }))) {
+        handleEvent(JSON.parse(data), turn);
+        if (turn.terminal) break;
+      }
+      if (turn.terminal) {
+        try {
+          reader.cancel();
+        } catch {
+          /* already closed */
+        }
+        break;
+      }
+    }
+  }
+
+  /* Shared finish: label the box, reload the thread on success. */
+  async function finishTurn(turn, message) {
+    turn.cursor.remove();
+    state.fetchCtrl = null;
+    setBusy(false);
+
+    if (turn.errorMsg) {
+      if (!turn.text) turn.ai.box.remove();
+      turn.ai.label.textContent = "kaeru · error";
+      addErrorBox(turn.errorMsg, message);
+    } else if (turn.aborted || (state.stopped && !turn.terminal)) {
+      turn.ai.label.textContent = "kaeru · stopped";
+    } else if (!turn.terminal) {
+      // The turn is still running server-side: re-attach and replay it (M3).
+      turn.ai.label.textContent = "kaeru · reconnecting…";
+      setTimeout(() => attachStream().catch(() => {}), 1000);
+    } else {
+      // Completed: swap the streamed plain text for the server's rendered
+      // HTML (the same renderer used on reload).
+      try {
+        await selectThread(state.threadId);
+      } catch {
+        /* keep the plain-text fallback already on screen */
+      }
+    }
+    turn.ai.label.textContent += fmtUsage(turn.usage);
+    scrollToBottom();
+    // The sidebar re-sorts by updatedAt and picks up the auto title.
+    loadThreads().catch(() => {});
   }
 
   async function sendMessage(text) {
@@ -418,36 +536,9 @@
     scrollToBottom(true);
     state.sticky = true;
 
-    const ai = addBox("kaeru", "kaeru");
-    const thinking = thinkingBlock("", true);
-    thinking.hidden = true;
-    const thinkingBody = thinking.querySelector(".thinking-body");
-    ai.body.append(thinking);
-    const textNode = document.createTextNode("");
-    ai.body.append(textNode);
-    const cursor = document.createElement("span");
-    cursor.className = "cursor";
-    ai.body.append(cursor);
-
-    const turn = {
-      text: "",
-      reasoning: "",
-      usage: null,
-      terminal: false,
-      errorMsg: null,
-      aborted: false,
-    };
+    const turn = newTurnView("kaeru");
     const ctrl = new AbortController();
     state.fetchCtrl = ctrl;
-
-    const paint = () => {
-      if (turn.reasoning) {
-        thinking.hidden = false;
-        thinkingBody.textContent = turn.reasoning;
-      }
-      textNode.data = turn.text;
-      scrollToBottom();
-    };
 
     try {
       const payload = { message, thread: state.threadId };
@@ -461,26 +552,7 @@
         signal: ctrl.signal,
       });
       if (!response.ok) throw await readApiError(response);
-
-      const parseChunk = createSseParser();
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const data of parseChunk(decoder.decode(value, { stream: true }))) {
-          handleEvent(JSON.parse(data), turn, paint, thinking);
-          if (turn.terminal) break;
-        }
-        if (turn.terminal) {
-          try {
-            reader.cancel();
-          } catch {
-            /* already closed */
-          }
-          break;
-        }
-      }
+      await readStream(response, turn);
     } catch (err) {
       if (err.name === "AbortError") {
         turn.aborted = true;
@@ -488,46 +560,145 @@
         turn.errorMsg = err.message || String(err);
       }
     } finally {
-      cursor.remove();
-      state.fetchCtrl = null;
-      setBusy(false);
-
-      if (turn.errorMsg) {
-        if (!turn.text) ai.box.remove();
-        ai.label.textContent = "kaeru · error";
-        addErrorBox(turn.errorMsg, message);
-      } else if (turn.aborted || (state.stopped && !turn.terminal)) {
-        ai.label.textContent = "kaeru · stopped";
-      } else if (!turn.terminal) {
-        ai.label.textContent = "kaeru · connection lost";
-      } else {
-        // Completed: swap the streamed plain text for the server's rendered
-        // HTML (the same renderer used on reload).
-        try {
-          await selectThread(state.threadId);
-        } catch {
-          /* keep the plain-text fallback already on screen */
-        }
-      }
-      ai.label.textContent += fmtUsage(turn.usage);
-      scrollToBottom();
-      // The sidebar re-sorts by updatedAt and picks up the auto title.
-      loadThreads().catch(() => {});
+      await finishTurn(turn, message);
     }
   }
 
-  function handleEvent(event, turn, paint, thinking) {
+  /* Regenerate the last answer (M3): the server drops the old reply and
+     re-runs the last user message. */
+  async function regenerate() {
+    if (state.streaming || !state.threadId) return;
+    setBusy(true);
+    state.stopped = false;
+    const turn = newTurnView("kaeru · regenerating");
+    try {
+      const query = `?thread=${encodeURIComponent(state.threadId)}`;
+      const response = await apiFetch(`/api/regenerate${query}`, { method: "POST" });
+      if (!response.ok) throw await readApiError(response);
+      await readStream(response, turn);
+    } catch (err) {
+      turn.errorMsg = err.message || String(err);
+    } finally {
+      await finishTurn(turn, null);
+    }
+  }
+
+  /* Re-attach to the active turn after a reconnect/reload (M3, §6.3a). */
+  async function attachStream() {
+    if (state.streaming || !state.threadId) return;
+    let response;
+    try {
+      response = await apiFetch(`/api/stream?thread=${encodeURIComponent(state.threadId)}`);
+    } catch {
+      return;
+    }
+    if (response.status === 204 || !response.ok) return;
+    setBusy(true);
+    const turn = newTurnView("kaeru · resuming");
+    try {
+      await readStream(response, turn);
+    } catch (err) {
+      turn.errorMsg = err.message || String(err);
+    } finally {
+      await finishTurn(turn, null);
+    }
+  }
+
+  function toolCardFromCall(call) {
+    const details = document.createElement("details");
+    details.className = "tool";
+    const summary = document.createElement("summary");
+    summary.textContent = `🔧 ${call.name}`;
+    const body = document.createElement("pre");
+    body.className = "tool-body";
+    body.textContent =
+      typeof call.arguments === "string"
+        ? call.arguments
+        : JSON.stringify(call.arguments ?? {}, null, 2);
+    details.append(summary, body);
+    return details;
+  }
+
+  function addApprovalCard(turn, event) {
+    const card = document.createElement("div");
+    card.className = "approval";
+    const text = document.createElement("p");
+    text.className = "approval-text";
+    text.textContent = event.summary || "This action needs your consent.";
+    const row = document.createElement("div");
+    row.className = "approval-row";
+    const allow = document.createElement("button");
+    allow.type = "button";
+    allow.className = "action-btn";
+    allow.textContent = "allow";
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "action-btn stop";
+    deny.textContent = "deny";
+    const decide = async (decision) => {
+      allow.disabled = true;
+      deny.disabled = true;
+      try {
+        const response = await apiFetch("/api/approval", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: event.id, decision, thread: state.threadId }),
+        });
+        if (!response.ok && response.status !== 404) throw await readApiError(response);
+        card.classList.add(decision === "allow" ? "allowed" : "denied");
+        text.textContent = `${
+          decision === "allow" ? "allowed" : "denied"
+        }: ${event.summary || ""}`;
+        row.remove();
+      } catch (err) {
+        text.textContent = `could not record decision: ${err.message || err}`;
+        allow.disabled = false;
+        deny.disabled = false;
+      }
+    };
+    allow.addEventListener("click", () => decide("allow"));
+    deny.addEventListener("click", () => decide("deny"));
+    row.append(allow, deny);
+    card.append(text, row);
+    turn.steps.append(card);
+    scrollToBottom();
+  }
+
+  function handleEvent(event, turn) {
     switch (event.type) {
       case "delta":
         turn.text += event.text;
         // Fold the live thinking block away once the answer starts; it stays
         // available behind the summary triangle.
-        if (thinking && turn.reasoning && thinking.open) thinking.open = false;
-        paint();
+        if (turn.thinking && turn.reasoning && turn.thinking.open) {
+          turn.thinking.open = false;
+        }
+        turn.paint();
         break;
       case "reasoning":
         turn.reasoning += event.text;
-        paint();
+        turn.paint();
+        break;
+      case "tool_call": {
+        const card = toolCardFromCall(event);
+        turn.cards[event.id] = card;
+        turn.steps.append(card);
+        scrollToBottom();
+        break;
+      }
+      case "tool_result": {
+        const card = turn.cards[event.id];
+        if (card) {
+          card.classList.toggle("tool-error", !!event.is_error);
+          const body = card.querySelector(".tool-body");
+          if (body) body.textContent = event.output || "";
+          if (event.is_error) card.open = true;
+        }
+        scrollToBottom();
+        break;
+      }
+      case "approval_request":
+        addApprovalCard(turn, event);
         break;
       case "turn_done":
         turn.terminal = true;
@@ -547,7 +718,6 @@
         }
         break;
       default:
-        // tool_call / approval cards render from M3 on.
         break;
     }
   }
@@ -564,7 +734,7 @@
       // The stream itself will deliver the terminal aborted event.
     } catch {
       // Abort request failed (network hiccup): abort locally instead; the
-      // server aborts the turn when its subscriber disappears (M1 wiring).
+      // core keeps the turn alive until its replay buffer is abandoned.
       state.fetchCtrl?.abort();
     }
   }
@@ -588,6 +758,9 @@
   });
   sendBtn.addEventListener("click", () => sendMessage(composerEl.value));
   stopBtn.addEventListener("click", stop);
+  regenBtn.addEventListener("click", () => {
+    regenerate().catch((err) => addErrorBox(err.message || String(err)));
+  });
   newThreadBtn.addEventListener("click", () => {
     createThread().catch((err) => addErrorBox(err.message || String(err)));
   });

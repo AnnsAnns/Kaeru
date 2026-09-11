@@ -1,11 +1,10 @@
 //! `ChatSession` + `TurnHandle`: the decoupled turn executor (ADR-015).
 //!
-//! API shape is final from M1; the wiring is the documented M1 interim:
-//! `send` spawns the turn in the background and returns a `TurnHandle` whose
-//! event stream is request-scoped — when the last subscriber drops, the turn
-//! aborts. M3 replaces that wiring with an executor that survives frontend
-//! disconnects and replays a bounded buffer on `subscribe`, without any
-//! frontend change.
+//! M3 completes the wiring: a turn runs in a background task that survives
+//! frontend disconnects. Every event is buffered (bounded) for replay and
+//! broadcast live; `subscribe()` replays the buffer then follows live, so a
+//! reconnect resumes the same turn. The agent loop (`agent::loop`) drives the
+//! tool calls, consent middleware and fencing.
 //!
 //! Concurrency model: one active turn per session (`send` while active is
 //! `ApiErrorKind::Busy`). All session state lives behind a single
@@ -13,23 +12,30 @@
 //! races between the turn task and `abort` are resolved by turn-id guard:
 //! exactly one of them finalizes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::AgentCore;
+use crate::agent::Emitter;
+use crate::agent::r#loop::{self, LoopResult, TurnInput};
 use crate::context::{self, ContextPolicy};
 use crate::conversations::{
     CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredMessage,
 };
 use crate::error::{ApiError, ApiErrorKind, Result};
-use crate::events::{CoreEvent, Decision, EventStream, Usage};
-use crate::llm::{ChatMessage, ChatRequest};
+use crate::events::{
+    ApprovalFuture, ApprovalKind, ApprovalSink, CoreEvent, Decision, EventStream, Usage,
+};
+use crate::llm::ChatMessage;
+
+/// How long a consent card may wait for a decision before it fails closed.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Broadcast capacity for one turn's events. Generous: a lagged consumer
 /// only loses chat text (logged), never correctness.
@@ -68,12 +74,77 @@ struct ActiveTurn {
     turn_id: u64,
     join: JoinHandle<()>,
     events: broadcast::Sender<CoreEvent>,
+    /// Bounded replay buffer for reconnects (M3, ADR-015).
+    buffer: Arc<Mutex<VecDeque<CoreEvent>>>,
     /// Assistant text streamed so far; read by `abort` to flush a partial
     /// answer into history, since the aborted task cannot.
     partial: Arc<Mutex<String>>,
     /// Model thinking streamed so far (display-only); flushed like `partial`.
     reasoning: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
+    /// Consent seam for tools that need approval (M3).
+    approvals: Arc<SessionApprovals>,
+}
+
+/// Core-owned consent resolution for one frontend (ADR-014): emits
+/// `ApprovalRequest` and waits for `ChatSession::approve`, failing closed on
+/// timeout.
+struct SessionApprovals {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Decision>>>>,
+    next_id: AtomicU64,
+    emitter: Emitter,
+    timeout: Duration,
+}
+
+impl SessionApprovals {
+    fn new(emitter: Emitter, timeout: Duration) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+            emitter,
+            timeout,
+        }
+    }
+
+    /// Deliver a decision to a waiting request; false when the id is unknown.
+    fn resolve(&self, request_id: &str, decision: Decision) -> bool {
+        match self
+            .pending
+            .lock()
+            .expect("approvals lock poisoned")
+            .remove(request_id)
+        {
+            Some(sender) => sender.send(decision).is_ok(),
+            None => false,
+        }
+    }
+}
+
+impl ApprovalSink for SessionApprovals {
+    fn request(&self, kind: ApprovalKind, summary: String) -> ApprovalFuture {
+        let id = format!("appr{:x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("approvals lock poisoned")
+            .insert(id.clone(), tx);
+        self.emitter.emit(CoreEvent::ApprovalRequest {
+            id: id.clone(),
+            kind,
+            summary,
+        });
+        let pending = Arc::clone(&self.pending);
+        let timeout = self.timeout;
+        Box::pin(async move {
+            let decision = tokio::time::timeout(timeout, rx)
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or(Decision::Deny);
+            pending.lock().expect("approvals lock poisoned").remove(&id);
+            decision
+        })
+    }
 }
 
 impl ChatSession {
@@ -268,14 +339,17 @@ impl ChatSession {
         let turn_id = inner.next_turn_id;
         inner.next_turn_id += 1;
         let (events, rx) = broadcast::channel(TURN_EVENT_CAPACITY);
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let emitter = Emitter::new(events.clone(), Arc::clone(&buffer));
         let partial = Arc::new(Mutex::new(String::new()));
         let reasoning = Arc::new(Mutex::new(String::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
+        let approvals = Arc::new(SessionApprovals::new(emitter.clone(), APPROVAL_TIMEOUT));
         let join = tokio::spawn(run_turn(TurnTask {
             core: Arc::clone(&self.core),
             session: Arc::clone(&self.inner),
             turn_id,
-            events: events.clone(),
+            emitter: emitter.clone(),
             model,
             reasoning_effort,
             history,
@@ -284,14 +358,17 @@ impl ChatSession {
             partial: Arc::clone(&partial),
             reasoning: Arc::clone(&reasoning),
             cancelled: Arc::clone(&cancelled),
+            approvals: Arc::clone(&approvals),
         }));
         inner.active = Some(ActiveTurn {
             turn_id,
             join,
             events: events.clone(),
+            buffer,
             partial,
             reasoning,
             cancelled,
+            approvals,
         });
         Ok(TurnHandle {
             turn_id,
@@ -301,14 +378,24 @@ impl ChatSession {
         })
     }
 
-    /// Live tap into the active turn's events (no replay until M3).
+    /// Live events plus a bounded replay of the active turn (M3, ADR-015).
     ///
+    /// A reconnect replays everything buffered so far, then streams live.
     /// With no active turn this is an already-closed stream.
     pub fn subscribe(&self) -> EventStream {
         let inner = self.lock();
         match &inner.active {
-            Some(active) => active.events.subscribe(),
-            None => broadcast::channel(1).1,
+            Some(active) => {
+                let replay = active
+                    .buffer
+                    .lock()
+                    .expect("turn buffer poisoned")
+                    .iter()
+                    .cloned()
+                    .collect();
+                EventStream::replay(replay, active.events.subscribe())
+            }
+            None => EventStream::closed(),
         }
     }
 
@@ -319,11 +406,55 @@ impl ChatSession {
         abort_turn(&self.inner, None)
     }
 
-    /// Record a consent decision. Staged API: consent lands with tools in M3.
-    pub async fn approve(&self, _request_id: &str, _decision: Decision) -> Result<()> {
-        Err(ApiError::internal(
-            "consent flow is not implemented yet; it arrives with the agent loop in M3",
-        ))
+    /// Record a consent decision for a pending `ApprovalRequest` (M3). An
+    /// unknown request id is `NotFound` (already resolved or timed out).
+    pub async fn approve(&self, request_id: &str, decision: Decision) -> Result<()> {
+        let inner = self.lock();
+        let Some(active) = &inner.active else {
+            return Err(ApiError::new(
+                ApiErrorKind::NotFound,
+                "no turn is awaiting approval",
+            ));
+        };
+        if active.approvals.resolve(request_id, decision) {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ApiErrorKind::NotFound,
+                format!("no pending approval with id {request_id:?}"),
+            ))
+        }
+    }
+
+    /// Regenerate the last exchange (M3): drop the trailing assistant/tool
+    /// messages back to the last user message and re-run that turn. Fails
+    /// `Busy` while a turn is active and `Config` when there is nothing to
+    /// regenerate.
+    pub fn regenerate(&self) -> Result<TurnHandle> {
+        let mut inner = self.lock();
+        if inner.active.is_some() {
+            return Err(ApiError::new(
+                ApiErrorKind::Busy,
+                "a turn is already in progress; abort it first",
+            ));
+        }
+        let Some(last_user) = inner
+            .history
+            .iter()
+            .rposition(|message| message.role == crate::llm::Role::User)
+        else {
+            return Err(ApiError::config("nothing to regenerate"));
+        };
+        if last_user + 1 >= inner.history.len() {
+            return Err(ApiError::config("nothing to regenerate"));
+        }
+        // Drop everything after the last user message and replay it.
+        let message = inner.history[last_user].content.clone();
+        inner.history.truncate(last_user);
+        // Re-dispatch through the same path as a fresh send (which appends the
+        // user message and starts the turn).
+        drop(inner);
+        self.send(&message)
     }
 
     fn lock(&self) -> MutexGuard<'_, SessionInner> {
@@ -543,12 +674,12 @@ impl TurnHandle {
 
     /// A fresh live subscription to this turn's events (from now on).
     pub fn events(&self) -> EventStream {
-        self.events.subscribe()
+        EventStream::live(self.events.subscribe())
     }
 
     /// Consume the handle into the turn's event stream (from the turn start).
     pub fn into_events(self) -> EventStream {
-        self.rx
+        EventStream::live(self.rx)
     }
 
     /// Abort this turn (no-op if it already finished or was superseded).
@@ -592,7 +723,7 @@ struct TurnTask {
     core: Arc<AgentCore>,
     session: Arc<Mutex<SessionInner>>,
     turn_id: u64,
-    events: broadcast::Sender<CoreEvent>,
+    emitter: Emitter,
     model: String,
     reasoning_effort: Option<String>,
     history: Vec<ChatMessage>,
@@ -601,6 +732,7 @@ struct TurnTask {
     partial: Arc<Mutex<String>>,
     reasoning: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
+    approvals: Arc<SessionApprovals>,
 }
 
 async fn run_turn(task: TurnTask) {
@@ -608,7 +740,7 @@ async fn run_turn(task: TurnTask) {
         core,
         session,
         turn_id,
-        events,
+        emitter,
         model,
         reasoning_effort,
         history,
@@ -617,9 +749,8 @@ async fn run_turn(task: TurnTask) {
         partial,
         reasoning,
         cancelled,
+        approvals,
     } = task;
-    let mut outcome = TurnOutcome::Completed;
-    let mut turn_usage: Option<Usage> = None;
 
     // Deterministic context assembly (ADR-018): resolve overflow *before*
     // the provider call — drop-oldest, then fold the dropped turns into the
@@ -654,89 +785,28 @@ async fn run_turn(task: TurnTask) {
         Some(new_summary)
     };
 
-    let request = ChatRequest::new(model, context::assemble(None, summary.as_deref(), &window))
-        .with_reasoning_effort(reasoning_effort);
-
-    let mut client_rx = match core.client().chat(request).await {
-        Ok(rx) => rx,
-        Err(err) => {
-            outcome = TurnOutcome::Failed;
-            let _ = events.send(CoreEvent::error(err.kind, err.message));
-            finalize_turn(
-                &session,
-                turn_id,
-                &partial,
-                &reasoning,
-                outcome,
-                turn_usage.as_ref(),
-            );
-            return;
-        }
-    };
-
-    while let Some(event) = client_rx.recv().await {
-        if cancelled.load(Ordering::SeqCst) {
-            // Aborted from outside: abort_turn flushed history and emitted the
-            // terminal event already.
-            return;
-        }
-        match event {
-            CoreEvent::Delta { text } => {
-                partial
-                    .lock()
-                    .expect("partial lock poisoned")
-                    .push_str(&text);
-                if events.send(CoreEvent::Delta { text }).is_err() {
-                    outcome = TurnOutcome::Disconnected;
-                    break;
-                }
-            }
-            CoreEvent::Reasoning { text } => {
-                // Thinking is shown but never folded into the answer/context.
-                reasoning
-                    .lock()
-                    .expect("reasoning lock poisoned")
-                    .push_str(&text);
-                if events.send(CoreEvent::Reasoning { text }).is_err() {
-                    outcome = TurnOutcome::Disconnected;
-                    break;
-                }
-            }
-            CoreEvent::TurnDone { usage } => {
-                let _ = events.send(CoreEvent::TurnDone { usage });
-                turn_usage = usage;
-                break;
-            }
-            CoreEvent::Error { kind, message } => {
-                outcome = TurnOutcome::Failed;
-                let _ = events.send(CoreEvent::error(kind, message));
-                break;
-            }
-            other => {
-                let _ = events.send(other); // future variants pass through
-            }
-        }
-    }
-
-    finalize_turn(
-        &session,
+    // The agent loop owns the provider calls, tool executions, consent and
+    // fencing; the session owns the history flush (id-guarded).
+    let result = r#loop::run(TurnInput {
+        core: Arc::clone(&core),
+        model,
+        reasoning_effort,
+        window,
+        summary,
+        emitter,
+        partial: Arc::clone(&partial),
+        reasoning: Arc::clone(&reasoning),
+        cancelled: Arc::clone(&cancelled),
+        approvals,
         turn_id,
-        &partial,
-        &reasoning,
-        outcome,
-        turn_usage.as_ref(),
-    );
-}
+        max_steps: core.config().agent.max_steps,
+    })
+    .await;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnOutcome {
-    /// Provider finished (or the client stream ended without a terminal event
-    /// — tolerated as completion).
-    Completed,
-    /// Provider failed before finishing.
-    Failed,
-    /// Every frontend subscriber disappeared; M1 wiring aborts the turn.
-    Disconnected,
+    if cancelled.load(Ordering::SeqCst) {
+        return; // aborted from outside; abort_turn already flushed
+    }
+    finalize_turn(&session, turn_id, &partial, &reasoning, result);
 }
 
 /// Build the assistant message for a finished turn, attaching the model's
@@ -755,32 +825,38 @@ fn finalize_turn(
     turn_id: u64,
     partial: &Arc<Mutex<String>>,
     reasoning: &Arc<Mutex<String>>,
-    outcome: TurnOutcome,
-    usage: Option<&Usage>,
+    result: LoopResult,
 ) {
-    let partial = partial.lock().expect("partial lock poisoned").clone();
     let mut inner = session.lock().expect("session lock poisoned");
     let still_current = inner.active.as_ref().is_some_and(|a| a.turn_id == turn_id);
     if !still_current {
         return; // aborted from outside; abort_turn owns the flush
     }
     inner.active = None;
-    if let Some(usage) = usage {
-        inner.accumulated_usage.add(usage);
+    if let Some(usage) = result.usage {
+        inner.accumulated_usage.add(&usage);
     }
 
-    if !partial.is_empty() {
-        let reasoning = reasoning.lock().expect("reasoning lock poisoned").clone();
-        inner.history.push(assistant_message(partial, reasoning));
-    } else if outcome == TurnOutcome::Failed {
-        // The model produced nothing before failing: drop the trailing user
-        // message so a retry resends cleanly instead of duplicating it.
-        if inner
-            .history
-            .last()
-            .is_some_and(|m| m.role == crate::llm::Role::User)
-        {
-            inner.history.pop();
+    // The loop's messages are already complete and ordered; commit them.
+    let committed = result.new_messages.len();
+    inner.history.extend(result.new_messages);
+
+    if committed == 0 {
+        let partial = partial.lock().expect("partial lock poisoned").clone();
+        if !partial.is_empty() {
+            // Failed after streaming text (no final message): keep what showed.
+            let reasoning = reasoning.lock().expect("reasoning lock poisoned").clone();
+            inner.history.push(assistant_message(partial, reasoning));
+        } else if result.outcome == crate::agent::TurnOutcome::Failed {
+            // The model produced nothing before failing: drop the trailing user
+            // message so a retry resends cleanly instead of duplicating it.
+            if inner
+                .history
+                .last()
+                .is_some_and(|m| m.role == crate::llm::Role::User)
+            {
+                inner.history.pop();
+            }
         }
     }
     // Persist after every finalized turn ("serialize on finalize", M2).
@@ -790,9 +866,18 @@ fn finalize_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{ApprovalKind, Usage};
-    use crate::llm::{Cassette, FakeProvider, Interaction};
+    use crate::audit::AuditLog;
+    use crate::events::{ApprovalKind, Risk, Usage};
+    use crate::llm::{
+        Cassette, ChatFuture, ChatRequest, ClientMode, FakeProvider, Interaction, LlmClient,
+        ModelsFuture, Role,
+    };
+    use crate::search::{FakeSearch, SearchResult};
+    use crate::tools::{MemoryStore, MemoryWriteTool, Tool, ToolContext, ToolFuture, ToolRegistry};
+    use serde_json::{Value, json};
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn core_with(fake: FakeProvider) -> Arc<AgentCore> {
         Arc::new(AgentCore::new(
@@ -1060,7 +1145,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_subscriber_aborts_the_turn_with_partial_kept() {
+    async fn dropped_subscriber_no_longer_aborts_the_turn() {
+        // M3 (ADR-015): the turn executor survives a frontend disconnect; a
+        // reconnect would replay the buffer. The full answer is persisted.
         let request = ChatRequest::new(
             crate::config::DEFAULT_MODEL,
             vec![ChatMessage::user("hello")],
@@ -1077,7 +1164,7 @@ mod tests {
         let session = ChatSession::new(core_with(fake), "test");
 
         let handle = session.send("hello").unwrap();
-        drop(handle); // frontend disconnect: M1 wiring aborts the turn
+        drop(handle); // frontend disconnect: the turn keeps running (M3)
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
@@ -1087,13 +1174,46 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let history = session.history();
-        assert_eq!(
-            history.len(),
-            2,
-            "user message + partial answer must be kept"
-        );
+        assert_eq!(history.len(), 2, "user message + full answer must be kept");
+        // The whole answer arrived even with nobody listening.
         assert!(history[1].content.contains("d0"));
+        assert!(history[1].content.contains("d9"));
         assert!(!session.is_active());
+    }
+
+    #[tokio::test]
+    async fn subscribe_replays_the_turn_buffer_for_a_reconnect() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        );
+        let mut events = Vec::new();
+        for i in 0..6 {
+            events.push(CoreEvent::Delta {
+                text: format!("d{i} "),
+            });
+        }
+        events.push(CoreEvent::TurnDone { usage: None });
+        let fake = FakeProvider::from_cassette(cassette_for(&request, events))
+            .with_delay(Duration::from_millis(20));
+        let session = ChatSession::new(core_with(fake), "test");
+
+        let handle = session.send("hello").unwrap();
+        // Let a couple of deltas land in the buffer, then "reconnect".
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        let mut reconnected = session.subscribe();
+        let mut replayed = Vec::new();
+        while let Ok(event) = reconnected.recv().await {
+            let terminal = matches!(event, CoreEvent::TurnDone { .. });
+            replayed.push(event);
+            if terminal {
+                break;
+            }
+        }
+        // The replay starts from the beginning of the turn, not the reconnect.
+        assert!(matches!(replayed[0], CoreEvent::Delta { ref text } if text.contains("d0")));
+        assert!(matches!(replayed.last(), Some(CoreEvent::TurnDone { .. })));
+        drain(handle.into_events()).await;
     }
 
     #[tokio::test]
@@ -1212,14 +1332,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_is_staged_for_m3() {
+    async fn approving_an_unknown_request_is_not_found() {
+        // M3: the consent flow is implemented; an id nobody is waiting on is a
+        // plain NotFound (already resolved or timed out).
         let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
         let err = session
             .approve("appr_1", Decision::Allow)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, ApiErrorKind::Internal);
-        let _ = ApprovalKind::PackageInstall { packages: vec![] }; // types present from M1
+        assert_eq!(err.kind, ApiErrorKind::NotFound);
+        let _ = ApprovalKind::PackageInstall { packages: vec![] }; // M5 consent type
     }
 
     #[test]
@@ -1566,5 +1688,390 @@ mod tests {
         assert!(b.history().is_empty());
         assert_eq!(registry.list().unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /* ---------- M3: agent loop, consent, fencing, audit ---------- */
+
+    /// A scripted client: returns queued event batches in call order and
+    /// records every request it saw (so tests can inspect the payloads).
+    struct ScriptedClient {
+        script: StdMutex<std::collections::VecDeque<Vec<CoreEvent>>>,
+        requests: StdMutex<Vec<ChatRequest>>,
+    }
+
+    impl ScriptedClient {
+        fn new(script: Vec<Vec<CoreEvent>>) -> Arc<Self> {
+            Arc::new(Self {
+                script: StdMutex::new(script.into()),
+                requests: StdMutex::new(Vec::new()),
+            })
+        }
+
+        fn requests(&self) -> Vec<ChatRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl LlmClient for ScriptedClient {
+        fn chat(&self, request: ChatRequest) -> ChatFuture {
+            self.requests.lock().unwrap().push(request);
+            let events = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| vec![CoreEvent::TurnDone { usage: None }]);
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel(64);
+                tokio::spawn(async move {
+                    for event in events {
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+                Ok(rx)
+            })
+        }
+
+        fn list_models(&self) -> ModelsFuture {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
+
+    /// A tool that records its inputs and returns a fixed output.
+    struct StubTool {
+        name: &'static str,
+        risk: Risk,
+        output: String,
+        seen: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    impl Tool for StubTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> &'static str {
+            "a test stub"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self, _input: &Value) -> Risk {
+            self.risk.clone()
+        }
+        fn execute(&self, input: Value, _ctx: ToolContext) -> ToolFuture {
+            self.seen.lock().unwrap().push(input);
+            let output = self.output.clone();
+            Box::pin(async move { Ok(output) })
+        }
+    }
+
+    fn core_scripted(
+        client: Arc<dyn LlmClient>,
+        tools: ToolRegistry,
+        audit: AuditLog,
+    ) -> Arc<AgentCore> {
+        Arc::new(
+            AgentCore::with_mode(crate::config::Config::default(), client, ClientMode::Live)
+                .with_tools(tools)
+                .with_audit(audit),
+        )
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kaeru-m3-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn tool_calls_run_and_their_result_is_fenced() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut registry = ToolRegistry::new();
+        registry.register(StubTool {
+            name: "echo",
+            risk: Risk::Safe,
+            output: "TOOL-OUTPUT".into(),
+            seen: Arc::clone(&seen),
+        });
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "echo".into(),
+                    input: json!({"x": 1}),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta {
+                    text: "final answer".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let core = core_scripted(client.clone(), registry, AuditLog::disabled());
+        let session = ChatSession::new(core, "test");
+
+        let handle = session.send("hello").unwrap();
+        let events = drain(handle.into_events()).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolCall { name, .. } if name == "echo"))
+        );
+        let tool_result = events
+            .iter()
+            .find_map(|e| match e {
+                CoreEvent::ToolResult {
+                    output, is_error, ..
+                } => Some((output.clone(), *is_error)),
+                _ => None,
+            })
+            .expect("a ToolResult was emitted");
+        assert!(!tool_result.1);
+        assert!(tool_result.0.contains("TOOL-OUTPUT"));
+        assert!(tool_result.0.contains("untrusted-data"));
+        assert!(tool_result.0.contains("not instructions"));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::Delta { text } if text == "final answer"))
+        );
+        assert!(matches!(events.last(), Some(CoreEvent::TurnDone { .. })));
+
+        // History: user, assistant(tool_calls), tool(result), assistant(answer).
+        let history = session.history();
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1].role, Role::Assistant);
+        assert_eq!(history[1].tool_calls.as_ref().unwrap()[0].name, "echo");
+        assert_eq!(history[2].role, Role::Tool);
+        assert!(history[2].content.contains("TOOL-OUTPUT"));
+        assert_eq!(history[3], ChatMessage::assistant("final answer"));
+
+        // The tool ran once; the second main-model request carried the fenced
+        // result and still advertised the tools.
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[1].tools.is_empty());
+        assert!(
+            requests[1]
+                .messages
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content.contains("TOOL-OUTPUT"))
+        );
+    }
+
+    #[tokio::test]
+    async fn consent_gated_tool_waits_then_persists_when_allowed() {
+        let dir = temp_dir("consent-allow");
+        let audit_path = dir.join("audit.jsonl");
+        let mut registry = ToolRegistry::new();
+        registry.register(MemoryWriteTool::new(MemoryStore::new(dir.join("memory"))));
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "memory_write".into(),
+                    input: json!({"content": "remember frogs"}),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta {
+                    text: "saved".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let core = core_scripted(client, registry, AuditLog::new(&audit_path));
+        let session = Arc::new(ChatSession::new(core, "test"));
+
+        let handle = session.send("remember frogs").unwrap();
+        let mut tap = handle.events();
+        let approver = Arc::clone(&session);
+        let watcher = tokio::spawn(async move {
+            while let Ok(event) = tap.recv().await {
+                match event {
+                    CoreEvent::ApprovalRequest { id, .. } => {
+                        approver.approve(&id, Decision::Allow).await.unwrap();
+                        break;
+                    }
+                    CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
+                    _ => {}
+                }
+            }
+        });
+        let events = drain(handle.into_events()).await;
+        watcher.await.unwrap();
+
+        // A consent card was shown, and the tool ran afterwards.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ApprovalRequest { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolResult { is_error, .. } if !is_error))
+        );
+        // The entry was actually persisted (only after consent).
+        let memory_files: Vec<_> = std::fs::read_dir(dir.join("memory"))
+            .map(|entries| entries.flatten().collect())
+            .unwrap_or_default();
+        assert_eq!(memory_files.len(), 1);
+        // Audit recorded the allow decision.
+        let audit = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"decision\":\"allow\""));
+        assert!(audit.contains("memory_write"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn denied_consent_writes_nothing_and_is_audited() {
+        let dir = temp_dir("consent-deny");
+        let audit_path = dir.join("audit.jsonl");
+        let mut registry = ToolRegistry::new();
+        registry.register(MemoryWriteTool::new(MemoryStore::new(dir.join("memory"))));
+        let client = ScriptedClient::new(vec![vec![
+            CoreEvent::ToolCall {
+                id: "c1".into(),
+                name: "memory_write".into(),
+                input: json!({"content": "poison"}),
+            },
+            CoreEvent::TurnDone { usage: None },
+        ]]);
+        let core = core_scripted(client, registry, AuditLog::new(&audit_path));
+        let session = Arc::new(ChatSession::new(core, "test"));
+
+        let handle = session.send("write something").unwrap();
+        let mut tap = handle.events();
+        let approver = Arc::clone(&session);
+        let watcher = tokio::spawn(async move {
+            while let Ok(event) = tap.recv().await {
+                match event {
+                    CoreEvent::ApprovalRequest { id, .. } => {
+                        approver.approve(&id, Decision::Deny).await.unwrap();
+                        break;
+                    }
+                    CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
+                    _ => {}
+                }
+            }
+        });
+        let events = drain(handle.into_events()).await;
+        watcher.await.unwrap();
+
+        // The tool result is a structured denial; nothing was written.
+        assert!(events.iter().any(
+            |e| matches!(e, CoreEvent::ToolResult { output, is_error, .. } if *is_error && output.contains("denied"))
+        ));
+        assert!(std::fs::read_dir(dir.join("memory")).is_err());
+        let audit = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"decision\":\"deny\""));
+        assert!(audit.contains("\"status\":\"denied\""));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn raw_fetched_pages_never_reach_the_main_model() {
+        // The worker reads the raw page; only its distillation is fenced back.
+        let search = std::sync::Arc::new(FakeSearch::from_results(vec![SearchResult {
+            title: "Frogs".into(),
+            url: "https://example.test/frogs".into(),
+            snippet: "RAW-PAGE-MARKER".into(),
+        }]));
+        let client = ScriptedClient::new(vec![
+            // Main model asks for a search.
+            vec![
+                CoreEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "web_search".into(),
+                    input: json!({"query": "frogs"}),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            // Summarizer worker returns the distillation.
+            vec![
+                CoreEvent::Delta {
+                    text: "DISTILLED-SUMMARY".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            // Main model answers.
+            vec![
+                CoreEvent::Delta {
+                    text: "grounded answer".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let core = Arc::new(
+            AgentCore::with_mode(
+                crate::config::Config::default(),
+                client.clone(),
+                ClientMode::Live,
+            )
+            .with_tools(ToolRegistry::with_defaults(5, None))
+            .with_search(search),
+        );
+        let session = ChatSession::new(core, "test");
+
+        let handle = session.send("search frogs").unwrap();
+        let events = drain(handle.into_events()).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::Delta { text } if text == "grounded answer"))
+        );
+
+        let requests = client.requests();
+        // The worker saw the raw page text (fenced)...
+        assert!(requests.iter().any(|r| {
+            r.messages
+                .iter()
+                .any(|m| m.content.contains("RAW-PAGE-MARKER"))
+        }));
+        // ...but no main-model request (the ones with tools) ever did.
+        assert!(requests.iter().filter(|r| !r.tools.is_empty()).all(|r| {
+            r.messages
+                .iter()
+                .all(|m| !m.content.contains("RAW-PAGE-MARKER"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn regenerate_reruns_the_last_user_message() {
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::Delta { text: "one".into() },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta { text: "two".into() },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let session = ChatSession::new(
+            core_scripted(client.clone(), ToolRegistry::new(), AuditLog::disabled()),
+            "test",
+        );
+
+        let handle = session.send("hello").unwrap();
+        drain(handle.into_events()).await;
+        assert_eq!(session.history()[1], ChatMessage::assistant("one"));
+
+        let handle = session.regenerate().unwrap();
+        drain(handle.into_events()).await;
+        let history = session.history();
+        assert_eq!(history.len(), 2, "the old answer is replaced, not appended");
+        assert_eq!(history[0], ChatMessage::user("hello"));
+        assert_eq!(history[1], ChatMessage::assistant("two"));
+        assert_eq!(client.requests().len(), 2);
     }
 }

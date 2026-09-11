@@ -34,7 +34,8 @@ impl Role {
     }
 }
 
-/// One conversation message. `Tool` arrives with the agent loop (M3).
+/// One conversation message. `Tool` and assistant `tool_calls` arrive with the
+/// agent loop (M3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -44,6 +45,13 @@ pub struct ChatMessage {
     /// UI but never sent back to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Tool calls the assistant requested (assistant messages, M3). Sent back
+    /// to the provider verbatim so the following `tool` messages line up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// Which tool call this message answers (tool messages, M3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
@@ -52,6 +60,8 @@ impl ChatMessage {
             role,
             content: content.into(),
             reasoning: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -59,6 +69,23 @@ impl ChatMessage {
     pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
         self.reasoning = Some(reasoning.into());
         self
+    }
+
+    /// An assistant message that requested tool calls (M3).
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        let mut message = Self::new(Role::Assistant, content);
+        message.tool_calls = Some(tool_calls);
+        message
+    }
+
+    /// A `tool` result message answering `tool_call_id` (M3).
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        let mut message = Self::new(Role::Tool, content);
+        message.tool_call_id = Some(tool_call_id.into());
+        message
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -74,6 +101,31 @@ impl ChatMessage {
     }
 }
 
+/// A tool call the model requested (M3): the model-level form of the
+/// OpenAI `tool_calls` entry. `arguments` is the parsed JSON object; the wire
+/// form carries it as a JSON-encoded string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+impl ToolCall {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
 /// A turn request as the session layer builds it. Transport details
 /// (`stream`, `stream_options`) are filled in by the HTTP adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +136,12 @@ pub struct ChatRequest {
     /// on OpenRouter/OpenAI-style providers). `None` leaves it to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// OpenAI `tools` entries the model may call (M3). Empty = no tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
+    /// Optional output cap in tokens (bounded worker calls, M3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 impl ChatRequest {
@@ -92,12 +150,26 @@ impl ChatRequest {
             model: model.into(),
             messages,
             reasoning_effort: None,
+            tools: Vec::new(),
+            max_tokens: None,
         }
     }
 
     /// Builder: request a reasoning effort; blank values are ignored.
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort.filter(|e| !e.trim().is_empty());
+        self
+    }
+
+    /// Builder: advertise the given OpenAI `tools` entries.
+    pub fn with_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Builder: cap the provider's output.
+    pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens.filter(|t| *t > 0);
         self
     }
 }
@@ -139,6 +211,10 @@ pub(crate) struct WireChatRequest {
     pub stream_options: Option<WireStreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 impl WireChatRequest {
@@ -154,25 +230,69 @@ impl WireChatRequest {
                 include_usage: true,
             }),
             reasoning_effort: request.reasoning_effort.clone(),
+            tools: request.tools.clone(),
+            max_tokens: request.max_tokens,
         }
     }
 }
 
-/// A message as sent to the provider: `role` + `content` only. Model thinking
-/// (`ChatMessage::reasoning`) is display-only and never sent back.
+/// A message as sent to the provider: `role` + `content`, plus tool-call
+/// fields on the agent loop (M3). Model thinking (`ChatMessage::reasoning`) is
+/// display-only and never sent back. An assistant message that only requests
+/// tools sends `content: null` (the OpenAI shape).
 #[derive(Debug, Serialize)]
 pub(crate) struct WireChatMessage {
     pub role: Role,
-    pub content: String,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<WireToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl From<&ChatMessage> for WireChatMessage {
     fn from(message: &ChatMessage) -> Self {
+        let tool_calls = message.tool_calls.as_ref().map(|calls| {
+            calls
+                .iter()
+                .map(|call| WireToolCall {
+                    id: call.id.clone(),
+                    r#type: "function",
+                    function: WireFunctionCall {
+                        name: call.name.clone(),
+                        arguments: serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".into()),
+                    },
+                })
+                .collect()
+        });
+        // A tool-only assistant turn carries no prose: send null, not "".
+        let content = if message.content.is_empty() && tool_calls.is_some() {
+            None
+        } else {
+            Some(message.content.clone())
+        };
         Self {
             role: message.role,
-            content: message.content.clone(),
+            content,
+            tool_calls,
+            tool_call_id: message.tool_call_id.clone(),
         }
     }
+}
+
+/// OpenAI `tool_calls` entry on an outbound message.
+#[derive(Debug, Serialize)]
+pub(crate) struct WireToolCall {
+    pub id: String,
+    pub r#type: &'static str,
+    pub function: WireFunctionCall,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WireFunctionCall {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +325,9 @@ pub(crate) struct WireDelta {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Streaming tool-call fragments (M3); accumulated by the adapter.
+    #[serde(default)]
+    pub tool_calls: Vec<WireDeltaToolCall>,
 }
 
 impl WireDelta {
@@ -214,6 +337,27 @@ impl WireDelta {
             .as_deref()
             .or(self.reasoning.as_deref())
     }
+}
+
+/// One fragment of a streamed tool call. `index` ties the fragments of one
+/// call together; `name` usually arrives whole in the first fragment, while
+/// `arguments` is split across many.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireDeltaToolCall {
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub function: Option<WireDeltaFunction>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireDeltaFunction {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
 }
 
 /// Provider usage; OpenAI names (`prompt_tokens`, `completion_tokens`).
@@ -266,6 +410,9 @@ pub(crate) struct WireMessage {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Complete tool calls on a non-streaming completion (M3).
+    #[serde(default)]
+    pub tool_calls: Vec<WireMessageToolCall>,
 }
 
 impl WireMessage {
@@ -275,6 +422,35 @@ impl WireMessage {
             .as_deref()
             .or(self.reasoning.as_deref())
     }
+
+    /// The message's tool calls in model form (arguments parsed from JSON).
+    pub(crate) fn tool_calls(&self) -> Vec<ToolCall> {
+        self.tool_calls
+            .iter()
+            .map(|call| ToolCall {
+                id: call.id.clone(),
+                name: call.function.name.clone(),
+                arguments: serde_json::from_str(&call.function.arguments)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireMessageToolCall {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub function: WireMessageFunction,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireMessageFunction {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub arguments: String,
 }
 
 /// OpenAI-style error body: `{"error": {"message": ...}}`.
@@ -344,6 +520,44 @@ mod tests {
                 "stream_options": {"include_usage": true}
             })
         );
+    }
+
+    #[test]
+    fn tool_call_messages_serialize_with_null_content_and_tools() {
+        let request = ChatRequest::new(
+            "m",
+            vec![
+                ChatMessage::user("hi"),
+                ChatMessage::assistant_with_tool_calls(
+                    "",
+                    vec![ToolCall::new(
+                        "call_1",
+                        "web_search",
+                        serde_json::json!({"query": "x"}),
+                    )],
+                ),
+                ChatMessage::tool("call_1", "result"),
+            ],
+        )
+        .with_tools(vec![serde_json::json!({"type": "function"})]);
+        let json = serde_json::to_value(WireChatRequest::streaming(&request)).unwrap();
+        assert_eq!(
+            json["messages"][1],
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            })
+        );
+        assert_eq!(
+            json["messages"][2],
+            serde_json::json!({"role": "tool", "content": "result", "tool_call_id": "call_1"})
+        );
+        assert_eq!(json["tools"][0]["type"], "function");
     }
 
     #[test]

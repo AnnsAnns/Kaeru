@@ -16,6 +16,12 @@ pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 pub const DEFAULT_PORT: u16 = 8080;
 /// Deterministic context budget (ADR-018) in estimated tokens.
 pub const DEFAULT_MAX_PROMPT_TOKENS: u64 = 16_000;
+/// Agent-loop step ceiling: tool calls per turn before the loop stops (M3).
+pub const DEFAULT_MAX_STEPS: u32 = 8;
+/// Default number of web results a search returns (M3).
+pub const DEFAULT_SEARCH_RESULTS: usize = 5;
+/// Default output cap for a worker call (bounded distillation, M3/ADR-021).
+pub const DEFAULT_WORKER_MAX_OUTPUT_TOKENS: u32 = 600;
 
 const DEFAULT_CONFIG_TOML: &str = r##"# Kaeru configuration. This file holds your provider API key:
 # keep it private (it is written with 0600 permissions and git-ignored).
@@ -52,6 +58,30 @@ reasoning_effort = ""
 # assembled as [rolling summary] + recent window; when a conversation grows
 # past this budget, the oldest turns are summarized (never silently truncated).
 max_prompt_tokens = 16000
+
+[agent]
+# Maximum tool-calling steps per turn before the loop stops and answers (M3).
+max_steps = 8
+
+[search]
+# Web search provider for the `web_search` tool (M3). One of:
+#   "off"      no web search (the tool reports it is not configured)
+#   "brave"    Brave Search API      (api_key required)
+#   "tavily"   Tavily Search API     (api_key required)
+#   "searxng"  a self-hosted SearxNG (base_url required, e.g. http://127.0.0.1:8888)
+provider = "off"
+api_key = ""
+base_url = ""
+# How many results a search returns (pages fetched for summarization are capped).
+max_results = 5
+
+# Worker models (ADR-021): concern-separated, tool-free LLM sub-calls with
+# their own model. The summarizer distills fetched web pages before they reach
+# the main model, so raw pages never enter the main context. An empty model
+# uses the provider default.
+[workers.summarizer]
+model = ""
+max_output_tokens = 600
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +95,12 @@ pub struct Config {
     pub provider: ProviderConfig,
     #[serde(default)]
     pub context: ContextConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
+    pub workers: WorkersConfig,
 }
 
 fn default_port() -> u16 {
@@ -89,6 +125,118 @@ impl Default for ContextConfig {
             max_prompt_tokens: DEFAULT_MAX_PROMPT_TOKENS,
         }
     }
+}
+
+fn default_max_steps() -> u32 {
+    DEFAULT_MAX_STEPS
+}
+
+/// Agent-loop knobs (M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Tool-calling steps per turn before the loop stops (bounded loop, M3).
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_steps: DEFAULT_MAX_STEPS,
+        }
+    }
+}
+
+fn default_search_results() -> usize {
+    DEFAULT_SEARCH_RESULTS
+}
+
+/// Web-search configuration (M3). `provider` selects the backend; an unknown
+/// value is normalized to `off` by [`Config::validate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchConfig {
+    /// `off` | `brave` | `tavily` | `searxng` (case-insensitive).
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api_key: String,
+    /// Self-hosted SearxNG endpoint (or a provider override base URL).
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default = "default_search_results")]
+    pub max_results: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: "off".into(),
+            api_key: String::new(),
+            base_url: String::new(),
+            max_results: DEFAULT_SEARCH_RESULTS,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// The normalized provider kind, or `Off` when unset/unknown.
+    pub fn kind(&self) -> SearchProviderKind {
+        SearchProviderKind::parse(&self.provider)
+    }
+}
+
+/// Which web-search backend `[search] provider` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchProviderKind {
+    Off,
+    Brave,
+    Tavily,
+    Searxng,
+}
+
+impl SearchProviderKind {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "brave" => Self::Brave,
+            "tavily" => Self::Tavily,
+            "searxng" | "searx" => Self::Searxng,
+            _ => Self::Off,
+        }
+    }
+}
+
+fn default_max_output_tokens() -> u32 {
+    DEFAULT_WORKER_MAX_OUTPUT_TOKENS
+}
+
+/// Per-worker model + bound (ADR-021). An empty `model` means the provider
+/// default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerConfig {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            max_output_tokens: DEFAULT_WORKER_MAX_OUTPUT_TOKENS,
+        }
+    }
+}
+
+/// Worker registry configuration (M3: the summarizer; M4 adds the distiller).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkersConfig {
+    #[serde(default)]
+    pub summarizer: WorkerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +290,9 @@ impl Default for Config {
             auth_token: None,
             provider: ProviderConfig::default(),
             context: ContextConfig::default(),
+            agent: AgentConfig::default(),
+            search: SearchConfig::default(),
+            workers: WorkersConfig::default(),
         }
     }
 }
@@ -239,6 +390,24 @@ impl Config {
             .take()
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty());
+        config.search.provider = config.search.provider.trim().to_ascii_lowercase();
+        config.search.api_key = config.search.api_key.trim().to_owned();
+        config.search.base_url = config
+            .search
+            .base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_owned();
+        if config.search.max_results == 0 {
+            config.search.max_results = DEFAULT_SEARCH_RESULTS;
+        }
+        config.workers.summarizer.model = config.workers.summarizer.model.trim().to_owned();
+        if config.workers.summarizer.max_output_tokens == 0 {
+            config.workers.summarizer.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
+        }
+        if config.agent.max_steps == 0 {
+            config.agent.max_steps = DEFAULT_MAX_STEPS;
+        }
         if config.provider.base_url.is_empty() {
             return Err(ApiError::config("[provider] base_url must not be empty"));
         }
@@ -256,6 +425,10 @@ pub struct Paths {
     pub config: PathBuf,
     pub cassette: PathBuf,
     pub conversations: PathBuf,
+    /// Append-only audit log (M3).
+    pub audit: PathBuf,
+    /// Markdown memory store (M3 write side; M4 enriches).
+    pub memory: PathBuf,
 }
 
 impl Default for Paths {
@@ -264,6 +437,8 @@ impl Default for Paths {
             config: PathBuf::from("data/config.toml"),
             cassette: PathBuf::from("data/cassette.json"),
             conversations: PathBuf::from("data/conversations"),
+            audit: PathBuf::from("data/audit.jsonl"),
+            memory: PathBuf::from("data/memory"),
         }
     }
 }
@@ -339,6 +514,39 @@ model = "llama3"
             Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 100\n")
                 .unwrap();
         assert_eq!(config.context.max_prompt_tokens, 100);
+    }
+
+    #[test]
+    fn search_config_defaults_to_off_and_is_normalized() {
+        let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(config.search.kind(), SearchProviderKind::Off);
+        assert_eq!(config.search.max_results, DEFAULT_SEARCH_RESULTS);
+
+        let config =
+            Config::parse("[search]\nprovider = \"BRAVE\"\napi_key = \" k \"\nmax_results = 3\n")
+                .unwrap();
+        assert_eq!(config.search.kind(), SearchProviderKind::Brave);
+        assert_eq!(config.search.api_key, "k");
+        assert_eq!(config.search.max_results, 3);
+    }
+
+    #[test]
+    fn agent_and_worker_config_have_defaults() {
+        let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(config.agent.max_steps, DEFAULT_MAX_STEPS);
+        assert_eq!(config.workers.summarizer.model, "");
+        assert_eq!(
+            config.workers.summarizer.max_output_tokens,
+            DEFAULT_WORKER_MAX_OUTPUT_TOKENS
+        );
+
+        let config = Config::parse(
+            "[agent]\nmax_steps = 3\n[workers.summarizer]\nmodel = \"cheap/m\"\nmax_output_tokens = 128\n",
+        )
+        .unwrap();
+        assert_eq!(config.agent.max_steps, 3);
+        assert_eq!(config.workers.summarizer.model, "cheap/m");
+        assert_eq!(config.workers.summarizer.max_output_tokens, 128);
     }
 
     #[test]

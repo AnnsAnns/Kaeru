@@ -532,6 +532,68 @@ body {
   word-break: break-word;
 }
 
+/* ---- tool steps + consent cards (M3) ---- */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.tool {
+  font-size: 0.9em;
+  border: 2px dashed color-mix(in srgb, var(--box-color-standard) 60%, transparent);
+  border-radius: 2px;
+  padding: 4px 8px;
+}
+.tool summary {
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-headerf);
+}
+.tool-body {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 240px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--base-bd-background-color) 60%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+}
+.tool-error {
+  border-color: var(--error-color);
+}
+.tool-error summary {
+  color: var(--error-color);
+}
+.msg.tool {
+  min-height: 0;
+  align-self: stretch;
+  --box-color-standard: color-mix(in srgb, var(--base-text-color) 60%, transparent);
+}
+.approval {
+  border: 2px solid var(--accent-color);
+  border-radius: 2px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--base-background-color) 80%, var(--accent-color));
+}
+.approval-text {
+  margin: 0 0 8px;
+  font-size: 0.95em;
+}
+.approval-row {
+  display: flex;
+  gap: 8px;
+}
+.approval.allowed {
+  border-color: var(--accent-color);
+  opacity: 0.7;
+}
+.approval.denied {
+  border-color: var(--error-color);
+  opacity: 0.7;
+}
+
 /* ---- desktop: sidebar is a permanent column ---- */
 @media (min-width: 900px) {
   .sidebar {

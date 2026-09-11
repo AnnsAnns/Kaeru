@@ -5,16 +5,114 @@
 //! `Delta`/`TurnDone`/`Error`; `ToolCall`/`ToolResult` and `ApprovalRequest`
 //! come with the agent loop (M3), `Artifact` with files (M5).
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use crate::error::ApiErrorKind;
 
-/// A per-conversation subscription of live `CoreEvent`s.
+/// A subscription of `CoreEvent`s with bounded replay (ADR-015).
 ///
-/// M1: live tap of the active turn (no replay yet). M3 completes this with a
-/// bounded replay buffer so reconnects resume mid-turn (ADR-015).
-pub type EventStream = tokio::sync::broadcast::Receiver<CoreEvent>;
+/// M3 completes the turn executor: a reconnect replays the events buffered so
+/// far for the active turn, then follows live. A stream with no live source
+/// and no buffered events is already closed (`RecvError::Closed`).
+pub struct EventStream {
+    replay: std::vec::IntoIter<CoreEvent>,
+    live: Option<broadcast::Receiver<CoreEvent>>,
+}
+
+impl EventStream {
+    /// A stream that replays `replay` first, then follows `live`.
+    pub fn replay(replay: Vec<CoreEvent>, live: broadcast::Receiver<CoreEvent>) -> Self {
+        Self {
+            replay: replay.into_iter(),
+            live: Some(live),
+        }
+    }
+
+    /// A live-only stream (no replay); `into_events()` uses this because the
+    /// primordial receiver already captures every event from the turn start.
+    pub fn live(live: broadcast::Receiver<CoreEvent>) -> Self {
+        Self {
+            replay: Vec::new().into_iter(),
+            live: Some(live),
+        }
+    }
+
+    /// An already-closed stream (no active turn).
+    pub fn closed() -> Self {
+        Self {
+            replay: Vec::new().into_iter(),
+            live: None,
+        }
+    }
+
+    /// Receive the next event. Mirrors `broadcast::Receiver::recv`, including
+    /// `Lagged` (the caller may keep receiving) and `Closed` at the end.
+    pub async fn recv(&mut self) -> Result<CoreEvent, broadcast::error::RecvError> {
+        if let Some(event) = self.replay.next() {
+            return Ok(event);
+        }
+        match self.live.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => Err(broadcast::error::RecvError::Closed),
+        }
+    }
+}
+
+impl tokio_stream::Stream for EventStream {
+    type Item = CoreEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<CoreEvent>> {
+        let this = self.as_mut().get_mut();
+        loop {
+            if let Some(event) = this.replay.next() {
+                return Poll::Ready(Some(event));
+            }
+            let Some(rx) = this.live.as_mut() else {
+                return Poll::Ready(None);
+            };
+            // `broadcast::Receiver::recv` is cancel-safe, so a future polled
+            // once and dropped (on Pending) never loses a message.
+            let recv = rx.recv();
+            let mut recv = std::pin::pin!(recv);
+            match recv.as_mut().poll(cx) {
+                Poll::Ready(Ok(event)) => return Poll::Ready(Some(event)),
+                // A lagged consumer only loses chat text, never correctness.
+                Poll::Ready(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Poll::Ready(Err(broadcast::error::RecvError::Closed)) => {
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// A frontend-supplied decision on an `ApprovalRequest` (ADR-014).
+pub type ApprovalFuture = Pin<Box<dyn Future<Output = Decision> + Send>>;
+
+/// Core-owned consent seam (ADR-014). Tools call this; the frontend supplies
+/// the actual resolution (web: `POST /api/approval`; a default-deny timer
+/// fails closed when nobody answers).
+pub trait ApprovalSink: Send + Sync {
+    /// Ask for consent; resolves to [`Decision::Deny`] on timeout or when the
+    /// request could not be delivered (fail closed).
+    fn request(&self, kind: ApprovalKind, summary: String) -> ApprovalFuture;
+}
+
+/// A sink that approves nothing — the fail-closed default for headless tests.
+pub struct DenyAll;
+
+impl ApprovalSink for DenyAll {
+    fn request(&self, _kind: ApprovalKind, _summary: String) -> ApprovalFuture {
+        Box::pin(async { Decision::Deny })
+    }
+}
 
 /// Normalized agent turn events, shared by all frontends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +181,10 @@ impl CoreEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalKind {
+    /// Persist a memory entry. Memory survives across sessions, so a silent
+    /// write is a prompt-injection vector and always needs consent (M3,
+    /// ADR-016).
+    MemoryWrite { path: String },
     /// Install Python packages from the configured index [M5].
     PackageInstall { packages: Vec<String> },
     /// Grant network access inside the sandbox [M5].
@@ -97,12 +199,13 @@ pub enum Decision {
     Deny,
 }
 
-/// Tool risk levels; `NeedsApproval` routes through the consent flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Tool risk levels; `NeedsApproval` routes through the consent flow and
+/// carries what the card asks for (ADR-014).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {
     Safe,
-    NeedsApproval,
+    NeedsApproval(ApprovalKind),
 }
 
 /// Token usage as reported by the provider, normalized for the wire.
@@ -208,5 +311,56 @@ mod tests {
     fn usage_skips_missing_fields() {
         let json = serde_json::to_string(&Usage::default()).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn memory_write_approval_kind_round_trips() {
+        let kind = ApprovalKind::MemoryWrite {
+            path: "data/memory/2026-09-11".into(),
+        };
+        let json = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "memory_write", "path": "data/memory/2026-09-11"})
+        );
+        let back: ApprovalKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn risk_carries_the_approval_kind() {
+        let risk = Risk::NeedsApproval(ApprovalKind::MemoryWrite { path: "p".into() });
+        assert!(matches!(risk, Risk::NeedsApproval(_)));
+        assert_eq!(Risk::Safe, Risk::Safe);
+    }
+
+    #[tokio::test]
+    async fn event_stream_replays_then_follows_live() {
+        let (tx, rx) = broadcast::channel(8);
+        let mut stream = EventStream::replay(vec![CoreEvent::Delta { text: "a".into() }], rx);
+        // Live event queued before the first recv; replay wins first.
+        tx.send(CoreEvent::Delta { text: "b".into() }).unwrap();
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            CoreEvent::Delta { text: "a".into() }
+        );
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            CoreEvent::Delta { text: "b".into() }
+        );
+        drop(tx);
+        assert!(matches!(
+            stream.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_event_stream_ends_immediately() {
+        let mut stream = EventStream::closed();
+        assert!(matches!(
+            stream.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
     }
 }

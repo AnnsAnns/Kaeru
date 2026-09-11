@@ -21,8 +21,8 @@ use crate::error::{ApiError, ApiErrorKind, Result};
 use crate::events::{CoreEvent, Usage};
 use crate::llm::sse::SseParser;
 use crate::llm::types::{
-    ChatRequest, ModelInfo, WireChatRequest, WireChunk, WireCompletion, WireErrorBody,
-    WireModelList,
+    ChatRequest, ModelInfo, WireChatRequest, WireChunk, WireCompletion, WireDeltaToolCall,
+    WireErrorBody, WireModelList,
 };
 
 /// Backpressure channel from the adapter to the session layer.
@@ -184,10 +184,64 @@ async fn emit(tx: &mpsc::Sender<CoreEvent>, event: CoreEvent) -> bool {
     tx.send(event).await.is_ok()
 }
 
+/// Accumulates streamed `tool_calls` fragments into complete calls (M3).
+///
+/// Fragments are indexed; `id`/`name` usually arrive first, `arguments` is
+/// split across many chunks. Completed calls are emitted as `ToolCall` events
+/// just before the turn's terminal event.
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    calls: Vec<PartialToolCall>,
+}
+
+#[derive(Debug, Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn push(&mut self, fragments: &[WireDeltaToolCall]) {
+        for fragment in fragments {
+            while self.calls.len() <= fragment.index {
+                self.calls.push(PartialToolCall::default());
+            }
+            let call = &mut self.calls[fragment.index];
+            if let Some(id) = &fragment.id {
+                call.id = id.clone();
+            }
+            if let Some(function) = &fragment.function {
+                if let Some(name) = &function.name {
+                    call.name.push_str(name);
+                }
+                if let Some(arguments) = &function.arguments {
+                    call.arguments.push_str(arguments);
+                }
+            }
+        }
+    }
+
+    /// Drain the accumulated calls as `ToolCall` events (arguments parsed; a
+    /// malformed payload becomes `null` so the tool can report a clear error).
+    fn take_events(&mut self) -> Vec<CoreEvent> {
+        std::mem::take(&mut self.calls)
+            .into_iter()
+            .filter(|call| !call.name.is_empty())
+            .map(|call| CoreEvent::ToolCall {
+                id: call.id,
+                name: call.name,
+                input: serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null),
+            })
+            .collect()
+    }
+}
+
 /// Read an SSE response and forward it as `CoreEvent`s, tolerantly.
 async fn stream_events(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>) {
     let mut parser = SseParser::new();
     let mut usage: Option<Usage> = None;
+    let mut tool_calls = ToolCallAccumulator::default();
     let mut done = false;
     let mut stream = response.bytes_stream();
 
@@ -207,7 +261,7 @@ async fn stream_events(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>
             }
         };
         for payload in parser.push(&bytes) {
-            if !forward_payload(tx, &mut usage, &mut done, payload).await {
+            if !forward_payload(tx, &mut usage, &mut tool_calls, &mut done, payload).await {
                 return;
             }
         }
@@ -219,33 +273,43 @@ async fn stream_events(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>
     // Tolerate providers that close the stream without `[DONE]` or that end
     // with a final payload lacking its terminating blank line.
     for payload in parser.finish() {
-        if !forward_payload(tx, &mut usage, &mut done, payload).await {
+        if !forward_payload(tx, &mut usage, &mut tool_calls, &mut done, payload).await {
             return;
         }
     }
     if !done {
-        emit(tx, CoreEvent::TurnDone { usage }).await;
+        finish_stream(tx, usage, &mut tool_calls).await;
     }
+}
+
+/// Emit any tool calls produced by the turn, then its terminal `TurnDone`.
+/// Returns false when the consumer is gone.
+async fn finish_stream(
+    tx: &mpsc::Sender<CoreEvent>,
+    usage: Option<Usage>,
+    tool_calls: &mut ToolCallAccumulator,
+) -> bool {
+    for event in tool_calls.take_events() {
+        if !emit(tx, event).await {
+            return false;
+        }
+    }
+    emit(tx, CoreEvent::TurnDone { usage }).await
 }
 
 /// Handle one SSE payload. Returns false when the consumer is gone.
 async fn forward_payload(
     tx: &mpsc::Sender<CoreEvent>,
     usage: &mut Option<Usage>,
+    tool_calls: &mut ToolCallAccumulator,
     done: &mut bool,
     payload: String,
 ) -> bool {
     if payload == "[DONE]" {
         *done = true;
-        return emit(
-            tx,
-            CoreEvent::TurnDone {
-                usage: usage.take(),
-            },
-        )
-        .await;
+        return finish_stream(tx, usage.take(), tool_calls).await;
     }
-    for event in events_from_payload(&payload, usage) {
+    for event in events_from_payload(&payload, usage, tool_calls) {
         if !emit(tx, event).await {
             return false;
         }
@@ -253,8 +317,13 @@ async fn forward_payload(
     true
 }
 
-/// Parse one SSE payload into delta events (pure; unit-tested).
-fn events_from_payload(payload: &str, usage: &mut Option<Usage>) -> Vec<CoreEvent> {
+/// Parse one SSE payload into delta events (pure; unit-tested). Tool-call
+/// fragments are accumulated rather than emitted (see [`ToolCallAccumulator`]).
+fn events_from_payload(
+    payload: &str,
+    usage: &mut Option<Usage>,
+    tool_calls: &mut ToolCallAccumulator,
+) -> Vec<CoreEvent> {
     let chunk: WireChunk = match serde_json::from_str(payload) {
         Ok(chunk) => chunk,
         Err(e) => {
@@ -279,6 +348,9 @@ fn events_from_payload(payload: &str, usage: &mut Option<Usage>) -> Vec<CoreEven
             && !text.is_empty()
         {
             events.push(CoreEvent::Delta { text });
+        }
+        if !choice.delta.tool_calls.is_empty() {
+            tool_calls.push(&choice.delta.tool_calls);
         }
     }
     events
@@ -314,14 +386,16 @@ async fn json_fallback(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>
             return;
         }
     };
-    let (reasoning, text) = completion
+    let (reasoning, text, tool_calls) = completion
         .choices
         .into_iter()
         .next()
         .map(|c| {
+            let calls = c.message.tool_calls();
             (
                 c.message.reasoning_text().unwrap_or_default().to_owned(),
                 c.message.content.unwrap_or_default(),
+                calls,
             )
         })
         .unwrap_or_default();
@@ -330,6 +404,20 @@ async fn json_fallback(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>
     }
     if !text.is_empty() && !emit(tx, CoreEvent::Delta { text }).await {
         return;
+    }
+    for call in tool_calls {
+        if !emit(
+            tx,
+            CoreEvent::ToolCall {
+                id: call.id,
+                name: call.name,
+                input: call.arguments,
+            },
+        )
+        .await
+        {
+            return;
+        }
     }
     let usage = completion.usage.map(Usage::from);
     emit(tx, CoreEvent::TurnDone { usage }).await;
@@ -371,9 +459,11 @@ mod tests {
     #[test]
     fn delta_payload_becomes_delta_event() {
         let mut usage = None;
+        let mut tool_calls = ToolCallAccumulator::default();
         let events = events_from_payload(
             r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}"#,
             &mut usage,
+            &mut tool_calls,
         );
         assert_eq!(events, vec![CoreEvent::Delta { text: "Hel".into() }]);
         assert!(usage.is_none());
@@ -382,9 +472,11 @@ mod tests {
     #[test]
     fn usage_payload_is_captured_not_emitted() {
         let mut usage = None;
+        let mut tool_calls = ToolCallAccumulator::default();
         let events = events_from_payload(
             r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
             &mut usage,
+            &mut tool_calls,
         );
         assert!(events.is_empty());
         assert_eq!(
@@ -398,17 +490,46 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_fragments_accumulate_into_complete_calls() {
+        let mut usage = None;
+        let mut tool_calls = ToolCallAccumulator::default();
+        for payload in [
+            r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"web_search","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"frogs\"}"}}]}}]}"#,
+        ] {
+            assert!(events_from_payload(payload, &mut usage, &mut tool_calls).is_empty());
+        }
+        assert_eq!(
+            tool_calls.take_events(),
+            vec![CoreEvent::ToolCall {
+                id: "call_1".into(),
+                name: "web_search".into(),
+                input: serde_json::json!({"query": "frogs"}),
+            }]
+        );
+    }
+
+    #[test]
     fn empty_content_deltas_are_dropped() {
         let mut usage = None;
-        let events = events_from_payload(r#"{"choices":[{"delta":{"content":""}}]}"#, &mut usage);
+        let mut tool_calls = ToolCallAccumulator::default();
+        let events = events_from_payload(
+            r#"{"choices":[{"delta":{"content":""}}]}"#,
+            &mut usage,
+            &mut tool_calls,
+        );
         assert!(events.is_empty());
     }
 
     #[test]
     fn malformed_payloads_are_skipped() {
         let mut usage = None;
-        assert!(events_from_payload("not json at all", &mut usage).is_empty());
-        assert!(events_from_payload(r#"{"unexpected": true}"#, &mut usage).is_empty());
+        let mut tool_calls = ToolCallAccumulator::default();
+        assert!(events_from_payload("not json at all", &mut usage, &mut tool_calls).is_empty());
+        assert!(
+            events_from_payload(r#"{"unexpected": true}"#, &mut usage, &mut tool_calls).is_empty()
+        );
         assert!(usage.is_none());
     }
 
@@ -455,7 +576,10 @@ mod tests {
             total_tokens: None,
         });
         let mut done = false;
-        assert!(forward_payload(&tx, &mut usage, &mut done, "[DONE]".into()).await);
+        let mut tool_calls = ToolCallAccumulator::default();
+        assert!(
+            forward_payload(&tx, &mut usage, &mut tool_calls, &mut done, "[DONE]".into()).await
+        );
         assert!(done);
         drop(tx);
         let events: Vec<CoreEvent> = rx.recv().await.into_iter().collect();
@@ -477,6 +601,9 @@ mod tests {
         drop(rx);
         let mut usage = None;
         let mut done = false;
-        assert!(!forward_payload(&tx, &mut usage, &mut done, "[DONE]".into()).await);
+        let mut tool_calls = ToolCallAccumulator::default();
+        assert!(
+            !forward_payload(&tx, &mut usage, &mut tool_calls, &mut done, "[DONE]".into()).await
+        );
     }
 }

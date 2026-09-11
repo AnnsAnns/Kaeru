@@ -32,20 +32,53 @@ const server = http.createServer((req, res) => {
       const payload = JSON.parse(body);
       const sawStreamOption =
         payload.stream_options && payload.stream_options.include_usage === true;
+      const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
+      const sawToolResult = payload.messages.some((m) => m.role === "tool");
       console.log(
-        `[mock] chat model=${payload.model} messages=${payload.messages.length} stream=${payload.stream} include_usage=${sawStreamOption}`
+        `[mock] chat model=${payload.model} messages=${payload.messages.length} stream=${payload.stream} include_usage=${sawStreamOption} tools=${hasTools} sawToolResult=${sawToolResult}`
       );
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
       });
-      const chunks = [
-        { delta: { role: "assistant" } },
-        { delta: { content: "Hello" } },
-        { delta: { content: " from" } },
-        { delta: { content: " the mock server!" } },
-        { delta: {}, finish_reason: "stop" },
-      ];
+
+      // Exercise the M3 agent loop: the first turn asks for web_search, the
+      // turn after the tool result answers in plain text.
+      const chunks = hasTools && !sawToolResult
+        ? [
+            { delta: { role: "assistant" } },
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_mock_1",
+                    type: "function",
+                    function: { name: "web_search", arguments: "" },
+                  },
+                ],
+              },
+            },
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { arguments: '{"query":"kaeru frog agent"}' },
+                  },
+                ],
+              },
+            },
+            { delta: {}, finish_reason: "tool_calls" },
+          ]
+        : [
+            { delta: { role: "assistant" } },
+            { delta: { content: "Hello" } },
+            { delta: { content: " from" } },
+            { delta: { content: " the mock server!" } },
+            { delta: {}, finish_reason: "stop" },
+          ];
+
       let i = 0;
       const timer = setInterval(() => {
         if (i < chunks.length) {

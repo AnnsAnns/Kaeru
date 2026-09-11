@@ -2,7 +2,7 @@
 //!
 //! Prompt assembly is a fixed pipeline, never a heuristic:
 //!
-//! 1. system prompt (none yet; memory block joins the run at M4)
+//! 1. system prompt (the owner-written persona, M4.5)
 //! 2. injected memory block (selected durable notes, budgeted, M4)
 //! 3. rolling summary (a system message once the budget was exceeded)
 //! 4. the recent message window
@@ -41,13 +41,14 @@ impl ContextPolicy {
 }
 
 /// Split the history into `(window, dropped)` under the budget (minus what
-/// the summary and the injected memory block will cost). The trailing message
-/// is always kept — even when it alone exceeds the budget — and the window is
-/// aligned to start at a `user` message so pairs stay coherent.
+/// the summary and the fixed system blocks (persona, memory) will cost). The
+/// trailing message is always kept — even when it alone exceeds the budget —
+/// and the window is aligned to start at a `user` message so pairs stay
+/// coherent.
 pub fn split_window(
     policy: ContextPolicy,
     summary: Option<&str>,
-    memory_tokens: u64,
+    injected_tokens: u64,
     history: &[ChatMessage],
 ) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
     let summary_tokens = summary
@@ -56,7 +57,7 @@ pub fn split_window(
         .unwrap_or(0);
     let budget = policy
         .max_prompt_tokens
-        .saturating_sub(summary_tokens + memory_tokens);
+        .saturating_sub(summary_tokens + injected_tokens);
 
     let mut used = 0u64;
     let mut start = history.len();

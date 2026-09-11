@@ -22,6 +22,11 @@ pub const DEFAULT_MAX_STEPS: u32 = 8;
 pub const DEFAULT_SEARCH_RESULTS: usize = 5;
 /// Default output cap for a worker call (bounded distillation, M3/ADR-021).
 pub const DEFAULT_WORKER_MAX_OUTPUT_TOKENS: u32 = 600;
+/// Default output cap for the reflector, which emits several notes per run
+/// (M4.5/ADR-028).
+pub const DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS: u32 = 1200;
+/// Default local time for the evening reflection (21:00, M4.5/ADR-028).
+pub const DEFAULT_REFLECT_TIME: &str = "21:00";
 
 const DEFAULT_CONFIG_TOML: &str = r##"# Kaeru configuration. This file holds your provider API key:
 # keep it private (it is written with 0600 permissions and git-ignored).
@@ -88,6 +93,24 @@ max_output_tokens = 600
 [workers.distiller]
 model = ""
 max_output_tokens = 600
+
+# Evening reflection (M4.5, ADR-028): a daily job digests the conversations
+# changed since the last run into `reflect`-tagged memory notes via the
+# tool-free reflector worker. Enabling it is the standing consent; every run
+# is audited. Leave disabled to avoid nightly worker token cost.
+[reflect]
+enabled = false
+# Local time (HH:MM) for the daily run; a missed evening is caught up at boot.
+time = "21:00"
+# Let the reflector revise data/persona.md a little when it judges the change
+# helpful. Every change is recorded as a `persona` memory note (why + how).
+persona_edits = true
+
+# The reflector writes several notes per run, so it gets more room than the
+# other workers. An empty model uses the provider default.
+[workers.reflector]
+model = ""
+max_output_tokens = 1200
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,6 +130,8 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub workers: WorkersConfig,
+    #[serde(default)]
+    pub reflect: ReflectConfig,
 }
 
 fn default_port() -> u16 {
@@ -217,6 +242,60 @@ fn default_max_output_tokens() -> u32 {
     DEFAULT_WORKER_MAX_OUTPUT_TOKENS
 }
 
+/// Evening-reflection configuration (M4.5, ADR-028). Enabling reflection is the
+/// owner's standing consent for unattended, tool-free memory writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReflectConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Local time of the daily run, `HH:MM` (default 21:00).
+    #[serde(default = "default_reflect_time")]
+    pub time: String,
+    /// Allow the reflector to revise `data/persona.md` a little when it judges
+    /// the change helpful (M4.5). Every change is recorded as a memory note.
+    #[serde(default = "default_persona_edits")]
+    pub persona_edits: bool,
+}
+
+fn default_reflect_time() -> String {
+    DEFAULT_REFLECT_TIME.to_owned()
+}
+
+fn default_persona_edits() -> bool {
+    true
+}
+
+impl Default for ReflectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            time: default_reflect_time(),
+            persona_edits: true,
+        }
+    }
+}
+
+impl ReflectConfig {
+    /// The scheduled time as minutes since local midnight; an unparseable
+    /// value falls back to the default (21:00).
+    pub fn scheduled_minutes(&self) -> u32 {
+        parse_hhmm(&self.time).unwrap_or_else(|| parse_hhmm(DEFAULT_REFLECT_TIME).unwrap_or(1260))
+    }
+}
+
+/// Parse `HH:MM` into minutes since midnight; `None` when malformed or out of
+/// range.
+fn parse_hhmm(value: &str) -> Option<u32> {
+    let (hours, minutes) = value.trim().split_once(':')?;
+    let hours: u32 = hours.trim().parse().ok()?;
+    let minutes: u32 = minutes.trim().parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(hours * 60 + minutes)
+}
+
 /// Per-worker model + bound (ADR-021). An empty `model` means the provider
 /// default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +316,32 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Worker registry configuration (the summarizer, M3; the distiller, M4).
+fn default_reflector_max_output_tokens() -> u32 {
+    DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS
+}
+
+/// The reflector's per-worker config (M4.5): same shape as [`WorkerConfig`] but
+/// with a larger default output cap, since it emits several notes per run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReflectorWorkerConfig {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_reflector_max_output_tokens")]
+    pub max_output_tokens: u32,
+}
+
+impl Default for ReflectorWorkerConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            max_output_tokens: DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS,
+        }
+    }
+}
+
+/// Worker registry configuration (the summarizer, M3; the distiller, M4; the
+/// reflector, M4.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkersConfig {
@@ -245,6 +349,8 @@ pub struct WorkersConfig {
     pub summarizer: WorkerConfig,
     #[serde(default)]
     pub distiller: WorkerConfig,
+    #[serde(default)]
+    pub reflector: ReflectorWorkerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,6 +407,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             search: SearchConfig::default(),
             workers: WorkersConfig::default(),
+            reflect: ReflectConfig::default(),
         }
     }
 }
@@ -417,6 +524,14 @@ impl Config {
         if config.workers.distiller.max_output_tokens == 0 {
             config.workers.distiller.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
         }
+        config.workers.reflector.model = config.workers.reflector.model.trim().to_owned();
+        if config.workers.reflector.max_output_tokens == 0 {
+            config.workers.reflector.max_output_tokens = DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS;
+        }
+        config.reflect.time = config.reflect.time.trim().to_owned();
+        if parse_hhmm(&config.reflect.time).is_none() {
+            config.reflect.time = default_reflect_time();
+        }
         if config.agent.max_steps == 0 {
             config.agent.max_steps = DEFAULT_MAX_STEPS;
         }
@@ -441,6 +556,10 @@ pub struct Paths {
     pub audit: PathBuf,
     /// Markdown memory store (M3 write side; M4 enriches).
     pub memory: PathBuf,
+    /// Owner-written persona/character file (M4.5, ADR-027).
+    pub persona: PathBuf,
+    /// Last successful evening-reflection run (M4.5, ADR-028).
+    pub reflect_state: PathBuf,
 }
 
 impl Default for Paths {
@@ -451,6 +570,8 @@ impl Default for Paths {
             conversations: PathBuf::from("data/conversations"),
             audit: PathBuf::from("data/audit.jsonl"),
             memory: PathBuf::from("data/memory"),
+            persona: PathBuf::from("data/persona.md"),
+            reflect_state: PathBuf::from("data/reflect-state.json"),
         }
     }
 }
@@ -564,6 +685,36 @@ model = "llama3"
         assert_eq!(config.agent.max_steps, 3);
         assert_eq!(config.workers.summarizer.model, "cheap/m");
         assert_eq!(config.workers.summarizer.max_output_tokens, 128);
+    }
+
+    #[test]
+    fn reflect_config_defaults_off_and_normalizes_time() {
+        let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+        assert!(!config.reflect.enabled);
+        assert_eq!(config.reflect.time, DEFAULT_REFLECT_TIME);
+        assert_eq!(config.reflect.scheduled_minutes(), 21 * 60);
+        assert!(config.reflect.persona_edits);
+        assert_eq!(
+            config.workers.reflector.max_output_tokens,
+            DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS
+        );
+
+        let config = Config::parse(
+            "[reflect]\nenabled = true\ntime = \" 07:05 \"\npersona_edits = false\n[workers.reflector]\nmodel = \"r/m\"\n",
+        )
+        .unwrap();
+        assert!(config.reflect.enabled);
+        assert_eq!(config.reflect.time, "07:05");
+        assert_eq!(config.reflect.scheduled_minutes(), 7 * 60 + 5);
+        assert!(!config.reflect.persona_edits);
+        assert_eq!(config.workers.reflector.model, "r/m");
+        assert_eq!(
+            config.workers.reflector.max_output_tokens,
+            DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS
+        );
+
+        let config = Config::parse("[reflect]\ntime = \"bogus\"\n").unwrap();
+        assert_eq!(config.reflect.time, DEFAULT_REFLECT_TIME);
     }
 
     #[test]

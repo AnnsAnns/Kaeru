@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentCore, AuditLog, ClientMode, Config, ConversationRegistry, ConversationStore, MemoryStore,
-    Paths, ToolRegistry,
+    Paths, Reflector, ToolRegistry,
 };
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
@@ -129,7 +129,8 @@ fn main() {
                 config.search.max_results,
                 Some(memory.clone()),
             ))
-            .with_memory(memory)
+            .with_memory(memory.clone())
+            .with_persona(cli.paths.persona.clone())
             .with_audit(AuditLog::new(cli.paths.audit.clone())),
         ),
         Err(err) => {
@@ -142,13 +143,26 @@ fn main() {
     // Nothing is created up front — the UI lists existing threads and creates
     // its first one on demand (reload falls back to newest/fresh, §6.6).
     let store = ConversationStore::new(cli.paths.conversations.clone());
-    let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store));
-    let state = AppState::new(core, registry);
+    let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store.clone()));
+
+    // M4.5: evening reflection over the same stores, plus its scheduler task.
+    let reflector = Arc::new(Reflector::new(
+        Arc::clone(&core),
+        memory,
+        store,
+        cli.paths.reflect_state.clone(),
+    ));
+    let state = AppState::new(core, registry, Some(Arc::clone(&reflector)));
 
     banner(&cli, &config, &state);
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {
+        // The reflection scheduler ticks on a local clock and catches up a
+        // missed evening at boot (ADR-028). It is a no-op when disabled.
+        tokio::spawn(agent_core::agent::reflect::scheduler(Arc::clone(
+            &reflector,
+        )));
         // One owner process per data dir (arc42, concurrency): nothing else
         // guards it in M1; a second instance simply fails to bind the port.
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], config.port));
@@ -200,7 +214,14 @@ fn banner(cli: &Cli, config: &Config, state: &AppState) {
         }
         kind => format!("{kind:?}"),
     };
+    let reflect = match state.reflector.as_ref() {
+        Some(reflector) if reflector.enabled() => {
+            format!("{} (daily, local time)", config.reflect.time)
+        }
+        _ => "off (set [reflect] enabled = true)".to_owned(),
+    };
     println!("  search     : {search}");
+    println!("  reflect    : {reflect}");
     println!("  tools      : {}", state.core.tools().len());
     println!(
         "  audit      : {}",

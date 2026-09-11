@@ -33,6 +33,9 @@ pub struct TurnInput {
     pub core: Arc<AgentCore>,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    /// The system prompt (the owner-written persona, M4.5), read fresh at turn
+    /// start (ADR-027).
+    pub system: Option<String>,
     /// The recent message window (already budget-checked by the session).
     pub window: Vec<ChatMessage>,
     pub summary: Option<String>,
@@ -67,6 +70,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
         core,
         model,
         reasoning_effort,
+        system,
         window,
         summary,
         memory,
@@ -81,7 +85,12 @@ pub async fn run(input: TurnInput) -> LoopResult {
 
     let tools: ToolRegistry = core.tools().clone();
     let tool_schemas = tools.schemas();
-    let mut messages = context::assemble(None, memory.as_deref(), summary.as_deref(), &window);
+    let mut messages = context::assemble(
+        system.as_deref(),
+        memory.as_deref(),
+        summary.as_deref(),
+        &window,
+    );
     let mut new_messages: Vec<ChatMessage> = Vec::new();
     let mut total_usage = Usage::default();
     let mut saw_usage = false;

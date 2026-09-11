@@ -752,6 +752,15 @@ async fn run_turn(task: TurnTask) {
         approvals,
     } = task;
 
+    // Persona (M4.5, ADR-027): the owner-written character is read fresh at
+    // every turn start and becomes the system prompt. An absent or unreadable
+    // file changes nothing.
+    let system = core.persona();
+    let system_tokens = system
+        .as_deref()
+        .map(ContextPolicy::estimate_tokens)
+        .unwrap_or(0);
+
     // Memory injection (M4, ADR-007): select a bounded block of durable notes
     // relevant to the newest user message and account for it in the budget.
     let memory = core.memory().and_then(|store| {
@@ -772,8 +781,12 @@ async fn run_turn(task: TurnTask) {
     // the provider call — drop-oldest, then fold the dropped turns into the
     // rolling summary with one bounded LLM sub-call. A failing summary
     // degrades to a deterministic excerpt, never to a lost turn.
-    let (window, dropped) =
-        context::split_window(policy, summary.as_deref(), memory_tokens, &history);
+    let (window, dropped) = context::split_window(
+        policy,
+        summary.as_deref(),
+        system_tokens + memory_tokens,
+        &history,
+    );
     let summary = if dropped.is_empty() {
         summary
     } else {
@@ -808,6 +821,7 @@ async fn run_turn(task: TurnTask) {
         core: Arc::clone(&core),
         model,
         reasoning_effort,
+        system,
         window,
         summary,
         memory,
@@ -2135,6 +2149,71 @@ mod tests {
         assert!(
             messages[memory_index].content.chars().count()
                 <= (crate::memory::MEMORY_BLOCK_BUDGET_TOKENS as usize) * 4
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn persona_becomes_the_system_prompt_and_reloads_per_turn() {
+        let dir = temp_dir("persona");
+        let persona = dir.join("persona.md");
+        std::fs::write(&persona, "You are a small pond frog. Be terse.\n").unwrap();
+
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::Delta { text: "ok".into() },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta { text: "ok".into() },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let core = Arc::new(
+            AgentCore::with_mode(
+                crate::config::Config::default(),
+                client.clone(),
+                ClientMode::Live,
+            )
+            .with_persona(persona.clone()),
+        );
+        let session = ChatSession::new(core, "test");
+        drain(session.send("hello").unwrap().into_events()).await;
+        // Edit the file; the next turn must pick it up with no restart.
+        std::fs::write(&persona, "You are a grumpy toad now.\n").unwrap();
+        drain(session.send("again").unwrap().into_events()).await;
+
+        let requests = client.requests();
+        assert_eq!(requests[0].messages[0].role, Role::System);
+        assert!(requests[0].messages[0].content.contains("small pond frog"));
+        assert_eq!(requests[1].messages[0].role, Role::System);
+        assert!(requests[1].messages[0].content.contains("grumpy toad"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_missing_persona_file_adds_no_system_message() {
+        let dir = temp_dir("no-persona");
+        let client = ScriptedClient::new(vec![vec![
+            CoreEvent::Delta { text: "ok".into() },
+            CoreEvent::TurnDone { usage: None },
+        ]]);
+        let core = Arc::new(
+            AgentCore::with_mode(
+                crate::config::Config::default(),
+                client.clone(),
+                ClientMode::Live,
+            )
+            .with_persona(dir.join("absent-persona.md")),
+        );
+        let session = ChatSession::new(core, "test");
+        drain(session.send("hello").unwrap().into_events()).await;
+        let requests = client.requests();
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .all(|message| message.role != Role::System)
         );
         std::fs::remove_dir_all(&dir).ok();
     }

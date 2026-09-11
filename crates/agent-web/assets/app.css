@@ -637,6 +637,10 @@ body {
   opacity: 0.7;
   margin: 6px 2px;
 }
+.reflect-now {
+  margin: 2px 0 6px;
+  align-self: flex-start;
+}
 .memory-list {
   list-style: none;
   margin: 4px 0 0;

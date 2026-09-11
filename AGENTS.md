@@ -33,9 +33,9 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 ## Layout
 
 ```
-crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers), tools, search, audit
+crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools, search, audit, memory
 crates/agent-web/      axum binary: main.rs (CLI), routes.rs, bridge.rs, error.rs, assets.rs, markdown.rs, assets/ (embedded UI)
-data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/
+data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
 ```
@@ -77,10 +77,11 @@ stubs. Examples:
   stage them.
 - **M3** added the bounded tool loop, `web_search`, the tool-free summarizer
   worker, the audit log, consent middleware and the disconnect-surviving turn
-  executor. Memory (the read/search/tag side, budgeted injection, the UI
-  browser, the distiller worker) is **M4**; `MemoryStore` ships only its write
-  side now so the consent gate is real — do not build the M4 side early. The
-  Python sandbox is M5.
+  executor. **M4** added the memory read side, budgeted injection, the browser
+  and the distiller worker. **M4.5** added the persona file (read fresh per turn
+  as the system prompt) and config-scheduled evening reflection into
+  `reflect`-tagged memory via the tool-free reflector worker. The Python sandbox
+  and file flow are **M5** — do not build them early.
 - **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
 When you complete milestone work, update the matching `docs/milestones/Mx.md`
@@ -101,6 +102,20 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   history flushes exactly once. M3's `Emitter` serializes emission (buffer +
   broadcast) and the aborted `Error { kind: Aborted }` is the last event, so the
   old late-delta window is closed.
+- **Persona & reflection (M4.5):** `data/persona.md` is read fresh at each turn
+  start (`AgentCore::persona`) and becomes the system slot of the deterministic
+  assembly (billed to the same budget as memory). `data/reflect-state.json`
+  (`{"lastRun": <unix>}`) advances only on a fully successful reflection; the
+  scheduler (`agent/reflect.rs`) compares local `(date, minutes)` tuples against
+  the scheduled time, so it is testable with an injected clock and never hammers
+  a failure (one attempt per cycle, retried next day). Reflection writes under
+  standing consent (`[reflect] enabled`), tool-free (C16), notes tagged
+  `reflect`. The reflector may also nudge `data/persona.md` (when
+  `[reflect] persona_edits`, default on): a bounded edit (growth cap +
+  absolute cap, same-character prompt) that is always recorded as a
+  `reflect, persona` memory note (why + how) and a `persona` audit entry, so it
+  is reviewable and reversible. `[workers.reflector]` uses
+  `ReflectorWorkerConfig` (1200-token default), distinct from `WorkerConfig`.
 - **M3 turn executor:** a turn runs in a background task that survives a dropped
   subscriber. `agent::Emitter` appends every event to a bounded `VecDeque`
   (`TURN_BUFFER_CAPACITY`) *and* broadcasts it; `ChatSession::subscribe()`

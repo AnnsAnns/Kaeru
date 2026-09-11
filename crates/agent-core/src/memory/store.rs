@@ -281,15 +281,35 @@ fn score_note(note: &MemoryNote, terms: &[String]) -> usize {
 /// Uses `localtime_r` through libc (already linked by std; no new
 /// dependency) so DST is handled, and falls back to UTC off unix.
 pub fn local_date() -> String {
-    let unix = SystemTime::now()
+    local_date_from_unix(now_unix() as i64)
+}
+
+/// Current wall-clock time as unix seconds.
+pub fn now_unix() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    local_date_from_unix(unix)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The local date (`YYYY-MM-DD`) of a unix timestamp; UTC off unix.
+pub fn local_date_from_unix(unix: i64) -> String {
+    match local_tm(unix) {
+        Some((year, month, day, _, _)) => format!("{year:04}-{month:02}-{day:02}"),
+        None => utc_date_from_unix(unix),
+    }
+}
+
+/// Minutes since local midnight of a unix timestamp; UTC off unix.
+pub fn local_minutes_from_unix(unix: i64) -> u32 {
+    match local_tm(unix) {
+        Some((_, _, _, hour, minute)) => (hour * 60 + minute) as u32,
+        None => (unix.rem_euclid(86_400) / 60) as u32,
+    }
 }
 
 #[cfg(unix)]
-fn local_date_from_unix(unix: i64) -> String {
+fn local_tm(unix: i64) -> Option<(i32, i32, i32, i32, i32)> {
     use std::os::raw::{c_char, c_int, c_long};
 
     #[repr(C)]
@@ -325,21 +345,21 @@ fn local_date_from_unix(unix: i64) -> String {
         tm_zone: std::ptr::null(),
     };
     let time: c_long = unix as c_long;
-    let result = unsafe { localtime_r(&time, &mut tm) };
-    if result.is_null() {
-        return utc_date_from_unix(unix);
+    if unsafe { localtime_r(&time, &mut tm) }.is_null() {
+        return None;
     }
-    format!(
-        "{:04}-{:02}-{:02}",
+    Some((
         tm.tm_year + 1900,
         tm.tm_mon + 1,
-        tm.tm_mday
-    )
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+    ))
 }
 
 #[cfg(not(unix))]
-fn local_date_from_unix(unix: i64) -> String {
-    utc_date_from_unix(unix)
+fn local_tm(_unix: i64) -> Option<(i32, i32, i32, i32, i32)> {
+    None
 }
 
 /// UTC fallback (`YYYY-MM-DD`), shared with the conversation store's clock.

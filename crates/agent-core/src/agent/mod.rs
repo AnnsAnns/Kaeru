@@ -3,10 +3,17 @@
 //! plain answer, bounded by `[agent] max_steps`.
 
 pub mod r#loop;
+pub mod reflect;
 pub mod workers;
 
 pub use r#loop::{LoopResult, TurnInput, TurnOutcome, run};
-pub use workers::{DISTILLER_SYSTEM, SUMMARIZER_SYSTEM, WorkerOutput, WorkerSpec, Workers};
+pub use reflect::{
+    REFLECT_TAG, REFLECT_TICK, ReflectOutcome, ReflectStatus, Reflector,
+    scheduler as reflect_scheduler,
+};
+pub use workers::{
+    DISTILLER_SYSTEM, REFLECTOR_SYSTEM, SUMMARIZER_SYSTEM, WorkerOutput, WorkerSpec, Workers,
+};
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

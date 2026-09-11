@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{AgentCore, ChatSession, ConversationRegistry};
+use agent_core::{AgentCore, ChatSession, ConversationRegistry, Reflector};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -27,11 +27,21 @@ use crate::{assets, bridge, error};
 pub struct AppState {
     pub core: Arc<AgentCore>,
     pub registry: Arc<ConversationRegistry>,
+    /// Evening-reflection job (M4.5); `None` when the frontend did not wire one.
+    pub reflector: Option<Arc<Reflector>>,
 }
 
 impl AppState {
-    pub fn new(core: Arc<AgentCore>, registry: Arc<ConversationRegistry>) -> Self {
-        Self { core, registry }
+    pub fn new(
+        core: Arc<AgentCore>,
+        registry: Arc<ConversationRegistry>,
+        reflector: Option<Arc<Reflector>>,
+    ) -> Self {
+        Self {
+            core,
+            registry,
+            reflector,
+        }
     }
 
     /// Test helper: a state on the builtin fake provider, backed by a fresh
@@ -61,7 +71,11 @@ impl AppState {
             Arc::clone(&core),
             agent_core::ConversationStore::new(dir),
         ));
-        Self { core, registry }
+        Self {
+            core,
+            registry,
+            reflector: None,
+        }
     }
 }
 
@@ -77,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route("/memory", get(list_memory))
+        .route("/reflect", post(post_reflect))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -420,6 +435,38 @@ async fn list_memory(State(state): State<AppState>, Query(query): Query<MemoryQu
     Json(json!({ "configured": true, "count": notes.len(), "notes": notes })).into_response()
 }
 
+/// Trigger an evening reflection on demand (M4.5, ADR-028). The same digest the
+/// scheduler runs; the schedule is bypassed but `[reflect] enabled` still gates
+/// it. Used by tests and the "reflect now" button in the memory panel.
+async fn post_reflect(State(state): State<AppState>) -> Response {
+    let Some(reflector) = state.reflector.as_ref() else {
+        return error::json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "reflection is not configured",
+        );
+    };
+    let now = agent_core::memory::store::now_unix();
+    match reflector.run_now(now).await {
+        Ok(outcome) => Json(json!({
+            "status": reflect_status_name(outcome.status),
+            "conversations": outcome.conversations,
+            "notes": outcome.notes,
+            "persona_changed": outcome.persona_changed,
+        }))
+        .into_response(),
+        Err(err) => error::api_error(&err),
+    }
+}
+
+fn reflect_status_name(status: agent_core::ReflectStatus) -> &'static str {
+    match status {
+        agent_core::ReflectStatus::Disabled => "disabled",
+        agent_core::ReflectStatus::NotDue => "not_due",
+        agent_core::ReflectStatus::Ran => "ran",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +647,53 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert!(notes[0]["content"].as_str().unwrap().contains("frogs"));
         assert_eq!(notes[0]["tags"][0], "animals");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reflect_endpoint_is_404_without_a_reflector() {
+        let state = AppState::fake();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/reflect",
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reflect_endpoint_runs_the_digest_on_demand() {
+        let dir = std::env::temp_dir().join(format!("kaeru-web-reflect-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
+        let core = Arc::new(AgentCore::new(config, Arc::new(FakeProvider::builtin())));
+        let store = agent_core::ConversationStore::new(dir.join("conversations"));
+        let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store.clone()));
+        let reflector = Arc::new(Reflector::new(
+            Arc::clone(&core),
+            agent_core::MemoryStore::new(dir.join("memory")),
+            store,
+            dir.join("reflect-state.json"),
+        ));
+        let state = AppState::new(core, registry, Some(reflector));
+
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/reflect",
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "ran");
+        assert_eq!(json["conversations"], 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

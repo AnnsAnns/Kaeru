@@ -22,14 +22,17 @@ pub mod search;
 pub mod session;
 pub mod tools;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use agent::{TurnOutcome, WorkerSpec, Workers};
+pub use agent::{
+    REFLECT_TAG, ReflectOutcome, ReflectStatus, Reflector, TurnOutcome, WorkerSpec, Workers,
+};
 pub use audit::{AuditEntry, AuditLog};
 pub use config::{
     AgentConfig, Config, ContextConfig, DEFAULT_BASE_URL, DEFAULT_MAX_PROMPT_TOKENS, DEFAULT_MODEL,
-    DEFAULT_PORT, Paths, ProviderConfig, SearchConfig, SearchProviderKind, WorkerConfig,
-    WorkersConfig,
+    DEFAULT_PORT, Paths, ProviderConfig, ReflectConfig, ReflectorWorkerConfig, SearchConfig,
+    SearchProviderKind, WorkerConfig, WorkersConfig,
 };
 pub use context::ContextPolicy;
 pub use conversations::{
@@ -63,6 +66,8 @@ pub struct AgentCore {
     workers: Arc<Workers>,
     audit: AuditLog,
     memory: Option<MemoryStore>,
+    /// Owner-written persona file, read fresh at each turn (M4.5, ADR-027).
+    persona: Option<PathBuf>,
 }
 
 impl AgentCore {
@@ -88,6 +93,7 @@ impl AgentCore {
             workers,
             audit: AuditLog::disabled(),
             memory: None,
+            persona: None,
         }
     }
 
@@ -112,6 +118,7 @@ impl AgentCore {
             workers,
             audit: AuditLog::disabled(),
             memory: None,
+            persona: None,
         })
     }
 
@@ -152,6 +159,41 @@ impl AgentCore {
     pub fn with_memory(mut self, memory: MemoryStore) -> Self {
         self.memory = Some(memory);
         self
+    }
+
+    /// Attach the owner-written persona file (M4.5, ADR-027). It is read fresh
+    /// at each turn, so edits apply without a restart.
+    pub fn with_persona(mut self, persona: impl Into<PathBuf>) -> Self {
+        self.persona = Some(persona.into());
+        self
+    }
+
+    /// The current persona text, read fresh from disk. An absent, unreadable or
+    /// non-UTF-8 file means no system prompt (the M1-M4 behavior); the failure
+    /// is logged, never fatal.
+    pub fn persona(&self) -> Option<String> {
+        let path = self.persona.as_ref()?;
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.to_owned())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                tracing::warn!(
+                    target: "agent_core::persona",
+                    "cannot read persona {}: {err}; continuing without a system prompt",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// The persona file path, when one is configured (the reflection job may
+    /// revise it, M4.5).
+    pub fn persona_path(&self) -> Option<&std::path::Path> {
+        self.persona.as_deref()
     }
 
     /// Replace the tool registry (the M3 default set: web_search, memory_write).

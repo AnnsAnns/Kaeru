@@ -27,6 +27,8 @@
   const memoryQueryEl = $("memory-query");
   const memoryListEl = $("memory-list");
   const memoryEmptyEl = $("memory-empty");
+  const reflectBtn = $("reflect-btn");
+  const reflectStatusEl = $("reflect-status");
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -837,6 +839,38 @@
     loadMemory(memoryQueryEl.value.trim()).catch((err) =>
       addErrorBox(err.message || String(err)),
     );
+  });
+
+  // Evening reflection on demand (M4.5): the same digest the nightly job runs.
+  function refreshReflectStatus(outcome) {
+    reflectStatusEl.hidden = false;
+    if (outcome.status === "disabled") {
+      reflectStatusEl.textContent = "reflection is off — enable [reflect] in config";
+      return;
+    }
+    const parts = [
+      `${outcome.notes} note(s) from ${outcome.conversations} conversation(s)`,
+    ];
+    if (outcome.persona_changed) parts.push("persona nudged");
+    reflectStatusEl.textContent = parts.join(" · ");
+  }
+  reflectBtn.addEventListener("click", async () => {
+    reflectBtn.disabled = true;
+    try {
+      const response = await apiFetch("/api/reflect", { method: "POST" });
+      if (response.status === 401) {
+        showTokenPrompt(() => reflectBtn.click());
+        return;
+      }
+      if (!response.ok) throw await readApiError(response);
+      const outcome = await response.json();
+      refreshReflectStatus(outcome);
+      loadMemory(memoryQueryEl.value.trim()).catch(() => {});
+    } catch (err) {
+      addErrorBox(err.message || String(err));
+    } finally {
+      reflectBtn.disabled = false;
+    }
   });
 
   /* ---------- models ---------- */

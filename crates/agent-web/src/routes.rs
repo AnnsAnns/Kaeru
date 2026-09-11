@@ -133,6 +133,17 @@ struct ThreadQuery {
 
 fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
     let id = session.conversation_id();
+    // Assistant replies are rendered to sanitized HTML here (ADR-026); the raw
+    // Markdown is kept alongside for reference. User input stays plain text.
+    let history: Vec<serde_json::Value> = session
+        .history()
+        .into_iter()
+        .map(|message| {
+            let html = (message.role == agent_core::Role::Assistant)
+                .then(|| crate::markdown::render(&message.content));
+            json!({ "role": message.role, "content": message.content, "html": html })
+        })
+        .collect();
     json!({
         // `conversation` kept as an M2-compatible alias of `id`.
         "conversation": id,
@@ -142,7 +153,7 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
         "fake": state.core.is_fake(),
         "title": session.title(),
         "summary": session.summary(),
-        "history": serde_json::to_value(session.history()).unwrap_or_default(),
+        "history": history,
         "usage": serde_json::to_value(session.total_usage()).unwrap_or_default(),
     })
 }
@@ -402,6 +413,27 @@ mod tests {
         // Accumulated usage: the builtin fake reports 21 in / 42 out / 63 total.
         assert_eq!(json["usage"]["input_tokens"], 21);
         assert_eq!(json["usage"]["total_tokens"], 63);
+    }
+
+    #[tokio::test]
+    async fn thread_history_ships_sanitized_html_for_assistant_messages() {
+        let state = AppState::fake();
+        chat(&state, json!({ "message": "**hi**" })).await;
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        let history = json["history"].as_array().unwrap();
+        assert_eq!(history[0]["role"], "user");
+        // User text stays plain: no html.
+        assert!(history[0]["html"].is_null());
+        assert_eq!(history[1]["role"], "assistant");
+        // Assistant replies carry server-rendered, sanitized HTML.
+        assert!(history[1]["html"].as_str().unwrap().starts_with("<p>"));
+        // Raw Markdown is preserved alongside.
+        assert!(
+            history[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("fake provider")
+        );
     }
 
     #[tokio::test]

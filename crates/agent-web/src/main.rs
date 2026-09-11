@@ -12,6 +12,7 @@
 mod assets;
 mod bridge;
 mod error;
+mod markdown;
 mod routes;
 
 use std::path::PathBuf;

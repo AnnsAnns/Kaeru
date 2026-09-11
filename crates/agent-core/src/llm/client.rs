@@ -159,8 +159,21 @@ impl LlmClient for HttpClient {
             Ok(list
                 .data
                 .into_iter()
-                .filter(|m| m.id.is_some())
-                .map(|m| ModelInfo { id: m.id.unwrap() })
+                .filter_map(|m| m.id.map(|id| (id, m.reasoning)))
+                .map(|(id, reasoning)| {
+                    let mut info = ModelInfo::new(id);
+                    if let Some(reasoning) = reasoning {
+                        info.reasoning_effort_levels = reasoning
+                            .effort_levels
+                            .into_iter()
+                            .filter_map(|level| level.value)
+                            .collect();
+                        info.default_reasoning_effort = reasoning
+                            .default_effort_level
+                            .filter(|effort| !effort.trim().is_empty());
+                    }
+                    info
+                })
                 .collect())
         })
     }
@@ -252,13 +265,23 @@ fn events_from_payload(payload: &str, usage: &mut Option<Usage>) -> Vec<CoreEven
     if let Some(wire_usage) = chunk.usage {
         *usage = Some(wire_usage.into());
     }
-    chunk
-        .choices
-        .into_iter()
-        .filter_map(|choice| choice.delta.content)
-        .filter(|text| !text.is_empty())
-        .map(|text| CoreEvent::Delta { text })
-        .collect()
+    let mut events = Vec::new();
+    for choice in chunk.choices {
+        // Thinking usually arrives before the answer in the same delta stream.
+        if let Some(text) = choice.delta.reasoning_text()
+            && !text.is_empty()
+        {
+            events.push(CoreEvent::Reasoning {
+                text: text.to_owned(),
+            });
+        }
+        if let Some(text) = choice.delta.content
+            && !text.is_empty()
+        {
+            events.push(CoreEvent::Delta { text });
+        }
+    }
+    events
 }
 
 /// Fallback for providers that answer JSON despite `stream: true`.
@@ -291,11 +314,20 @@ async fn json_fallback(response: reqwest::Response, tx: &mpsc::Sender<CoreEvent>
             return;
         }
     };
-    let text = completion
+    let (reasoning, text) = completion
         .choices
         .into_iter()
-        .find_map(|c| c.message.content)
+        .next()
+        .map(|c| {
+            (
+                c.message.reasoning_text().unwrap_or_default().to_owned(),
+                c.message.content.unwrap_or_default(),
+            )
+        })
         .unwrap_or_default();
+    if !reasoning.is_empty() && !emit(tx, CoreEvent::Reasoning { text: reasoning }).await {
+        return;
+    }
     if !text.is_empty() && !emit(tx, CoreEvent::Delta { text }).await {
         return;
     }

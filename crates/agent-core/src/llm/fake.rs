@@ -146,6 +146,7 @@ impl FakeProvider {
     /// A keyless default: canned response for any request + a model list.
     pub fn builtin() -> Self {
         let events = vec![
+            CoreEvent::Reasoning { text: "The user wants to see the fake provider speak. I will explain what it is and how to switch to a real model.".into() },
             CoreEvent::Delta { text: "This is Kaeru's fake provider, running keyless ".into() },
             CoreEvent::Delta { text: "for development. ".into() },
             CoreEvent::Delta { text: "Put a real [provider] api_key into data/config.toml, or run without --fake, to talk to an actual model.".into() },
@@ -158,12 +159,20 @@ impl FakeProvider {
         let models = [
             "openai/gpt-4o-mini",
             "openai/gpt-4o",
+            "deepseek-v4.1-flash",
             "anthropic/claude-3.5-sonnet",
             "meta-llama/llama-3.3-70b-instruct",
             "mistralai/mistral-small",
         ]
         .into_iter()
-        .map(|id| ModelInfo { id: id.to_owned() })
+        .map(|id| {
+            let mut info = ModelInfo::new(id);
+            if id.starts_with("deepseek") {
+                info.reasoning_effort_levels = vec!["low".into(), "high".into(), "xhigh".into()];
+                info.default_reasoning_effort = Some("high".into());
+            }
+            info
+        })
         .collect();
         Self {
             interactions: Mutex::new(Vec::new()),
@@ -344,9 +353,7 @@ mod tests {
             cassette_version: 1,
             recorded_at_unix: Some(1_760_000_000),
             base_url: Some("https://example.test/v1".into()),
-            models: vec![ModelInfo {
-                id: "m/test".into(),
-            }],
+            models: vec![ModelInfo::new("m/test")],
             interactions: vec![Interaction {
                 request: ChatRequest::new("m/test", vec![ChatMessage::user("hello")]),
                 events: vec![

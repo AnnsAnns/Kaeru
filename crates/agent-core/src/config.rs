@@ -42,6 +42,11 @@ api_key = ""
 # Default model for conversations (OpenRouter-style id, or your local model).
 model = "openai/gpt-4o-mini"
 
+# Reasoning effort for models that support it. Charm Hyper/DeepSeek accept
+# "low"/"high"/"xhigh"; OpenAI-style providers use "low"/"medium"/"high".
+# Leave empty to use the provider's own default effort.
+reasoning_effort = ""
+
 [context]
 # Deterministic context budget (ADR-018), in estimated tokens: prompts are
 # assembled as [rolling summary] + recent window; when a conversation grows
@@ -95,6 +100,20 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Optional reasoning effort for models that support it. Empty means the
+    /// provider's own default; normalized to `None` by [`Config::parse`].
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+impl ProviderConfig {
+    /// The configured reasoning effort, or `None` when unset/blank.
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+    }
 }
 
 fn default_base_url() -> String {
@@ -111,6 +130,7 @@ impl Default for ProviderConfig {
             base_url: default_base_url(),
             api_key: String::new(),
             model: default_model(),
+            reasoning_effort: None,
         }
     }
 }
@@ -208,6 +228,12 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
         config.provider.model = config.provider.model.trim().to_owned();
+        config.provider.reasoning_effort = config
+            .provider
+            .reasoning_effort
+            .take()
+            .map(|e| e.trim().to_owned())
+            .filter(|e| !e.is_empty());
         config.auth_token = config
             .auth_token
             .take()

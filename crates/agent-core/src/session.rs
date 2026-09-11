@@ -56,6 +56,8 @@ struct SessionInner {
     /// every save (M2.5). Kept here so in-memory state round-trips honestly.
     updated_at: String,
     model_override: Option<String>,
+    /// Per-conversation reasoning effort override (models that support it).
+    reasoning_effort_override: Option<String>,
     next_turn_id: u64,
     active: Option<ActiveTurn>,
     /// Persistence target; `None` for an ephemeral session (M1-style).
@@ -69,6 +71,8 @@ struct ActiveTurn {
     /// Assistant text streamed so far; read by `abort` to flush a partial
     /// answer into history, since the aborted task cannot.
     partial: Arc<Mutex<String>>,
+    /// Model thinking streamed so far (display-only); flushed like `partial`.
+    reasoning: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -106,6 +110,7 @@ impl ChatSession {
             created_at: crate::conversations::now_rfc3339(),
             updated_at: crate::conversations::now_rfc3339(),
             model_override: None,
+            reasoning_effort_override: None,
             next_turn_id: 1,
             active: None,
             store: None,
@@ -168,6 +173,24 @@ impl ChatSession {
         self.lock().model_override = model;
     }
 
+    /// The reasoning effort used for the next turn: per-conversation override,
+    /// else the configured default, else the provider's own default.
+    pub fn current_reasoning_effort(&self) -> Option<String> {
+        let inner = self.lock();
+        inner.reasoning_effort_override.clone().or_else(|| {
+            self.core
+                .config()
+                .provider
+                .reasoning_effort()
+                .map(str::to_owned)
+        })
+    }
+
+    /// Set or clear (None) the per-conversation reasoning effort override.
+    pub fn set_reasoning_effort(&self, effort: Option<String>) {
+        self.lock().reasoning_effort_override = effort;
+    }
+
     /// Set the conversation title (M2.5: used when a thread is created with
     /// one). A later first user message no longer overrides it.
     pub fn set_title(&self, title: Option<String>) {
@@ -223,6 +246,13 @@ impl ChatSession {
             .model_override
             .clone()
             .unwrap_or_else(|| self.core.config().provider.model.clone());
+        let reasoning_effort = inner.reasoning_effort_override.clone().or_else(|| {
+            self.core
+                .config()
+                .provider
+                .reasoning_effort()
+                .map(str::to_owned)
+        });
         inner.history.push(ChatMessage::user(message));
         if inner.title.is_none() {
             inner.title = Some(derive_title(message));
@@ -239,6 +269,7 @@ impl ChatSession {
         inner.next_turn_id += 1;
         let (events, rx) = broadcast::channel(TURN_EVENT_CAPACITY);
         let partial = Arc::new(Mutex::new(String::new()));
+        let reasoning = Arc::new(Mutex::new(String::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let join = tokio::spawn(run_turn(TurnTask {
             core: Arc::clone(&self.core),
@@ -246,10 +277,12 @@ impl ChatSession {
             turn_id,
             events: events.clone(),
             model,
+            reasoning_effort,
             history,
             summary,
             policy,
             partial: Arc::clone(&partial),
+            reasoning: Arc::clone(&reasoning),
             cancelled: Arc::clone(&cancelled),
         }));
         inner.active = Some(ActiveTurn {
@@ -257,6 +290,7 @@ impl ChatSession {
             join,
             events: events.clone(),
             partial,
+            reasoning,
             cancelled,
         });
         Ok(TurnHandle {
@@ -539,8 +573,13 @@ fn abort_turn(inner: &Arc<Mutex<SessionInner>>, only: Option<u64>) -> Result<boo
         .lock()
         .expect("partial lock poisoned")
         .clone();
+    let reasoning = active
+        .reasoning
+        .lock()
+        .expect("reasoning lock poisoned")
+        .clone();
     if !partial.is_empty() {
-        inner.history.push(ChatMessage::assistant(partial));
+        inner.history.push(assistant_message(partial, reasoning));
     }
     let _ = active
         .events
@@ -555,10 +594,12 @@ struct TurnTask {
     turn_id: u64,
     events: broadcast::Sender<CoreEvent>,
     model: String,
+    reasoning_effort: Option<String>,
     history: Vec<ChatMessage>,
     summary: Option<String>,
     policy: ContextPolicy,
     partial: Arc<Mutex<String>>,
+    reasoning: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -569,10 +610,12 @@ async fn run_turn(task: TurnTask) {
         turn_id,
         events,
         model,
+        reasoning_effort,
         history,
         summary,
         policy,
         partial,
+        reasoning,
         cancelled,
     } = task;
     let mut outcome = TurnOutcome::Completed;
@@ -611,14 +654,22 @@ async fn run_turn(task: TurnTask) {
         Some(new_summary)
     };
 
-    let request = ChatRequest::new(model, context::assemble(None, summary.as_deref(), &window));
+    let request = ChatRequest::new(model, context::assemble(None, summary.as_deref(), &window))
+        .with_reasoning_effort(reasoning_effort);
 
     let mut client_rx = match core.client().chat(request).await {
         Ok(rx) => rx,
         Err(err) => {
             outcome = TurnOutcome::Failed;
             let _ = events.send(CoreEvent::error(err.kind, err.message));
-            finalize_turn(&session, turn_id, &partial, outcome, turn_usage.as_ref());
+            finalize_turn(
+                &session,
+                turn_id,
+                &partial,
+                &reasoning,
+                outcome,
+                turn_usage.as_ref(),
+            );
             return;
         }
     };
@@ -640,6 +691,17 @@ async fn run_turn(task: TurnTask) {
                     break;
                 }
             }
+            CoreEvent::Reasoning { text } => {
+                // Thinking is shown but never folded into the answer/context.
+                reasoning
+                    .lock()
+                    .expect("reasoning lock poisoned")
+                    .push_str(&text);
+                if events.send(CoreEvent::Reasoning { text }).is_err() {
+                    outcome = TurnOutcome::Disconnected;
+                    break;
+                }
+            }
             CoreEvent::TurnDone { usage } => {
                 let _ = events.send(CoreEvent::TurnDone { usage });
                 turn_usage = usage;
@@ -656,7 +718,14 @@ async fn run_turn(task: TurnTask) {
         }
     }
 
-    finalize_turn(&session, turn_id, &partial, outcome, turn_usage.as_ref());
+    finalize_turn(
+        &session,
+        turn_id,
+        &partial,
+        &reasoning,
+        outcome,
+        turn_usage.as_ref(),
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -670,10 +739,22 @@ enum TurnOutcome {
     Disconnected,
 }
 
+/// Build the assistant message for a finished turn, attaching the model's
+/// thinking (when any) so the UI can show it again after a reload.
+fn assistant_message(content: String, reasoning: String) -> ChatMessage {
+    let message = ChatMessage::assistant(content);
+    if reasoning.is_empty() {
+        message
+    } else {
+        message.with_reasoning(reasoning)
+    }
+}
+
 fn finalize_turn(
     session: &Arc<Mutex<SessionInner>>,
     turn_id: u64,
     partial: &Arc<Mutex<String>>,
+    reasoning: &Arc<Mutex<String>>,
     outcome: TurnOutcome,
     usage: Option<&Usage>,
 ) {
@@ -689,7 +770,8 @@ fn finalize_turn(
     }
 
     if !partial.is_empty() {
-        inner.history.push(ChatMessage::assistant(partial));
+        let reasoning = reasoning.lock().expect("reasoning lock poisoned").clone();
+        inner.history.push(assistant_message(partial, reasoning));
     } else if outcome == TurnOutcome::Failed {
         // The model produced nothing before failing: drop the trailing user
         // message so a retry resends cleanly instead of duplicating it.
@@ -1061,6 +1143,67 @@ mod tests {
         assert_eq!(session.current_model(), crate::config::DEFAULT_MODEL);
     }
 
+    #[tokio::test]
+    async fn reasoning_streams_through_and_is_kept_out_of_the_answer() {
+        let (core, _request) = quick_turn(vec![
+            CoreEvent::Reasoning {
+                text: "let me think".into(),
+            },
+            CoreEvent::Delta {
+                text: "answer".into(),
+            },
+            CoreEvent::TurnDone { usage: None },
+        ]);
+        let session = ChatSession::new(core, "test");
+
+        let handle = session.send("hello").unwrap();
+        let events = drain(handle.into_events()).await;
+        assert_eq!(
+            events,
+            vec![
+                CoreEvent::Reasoning {
+                    text: "let me think".into()
+                },
+                CoreEvent::Delta {
+                    text: "answer".into()
+                },
+                CoreEvent::TurnDone { usage: None },
+            ]
+        );
+
+        // Thinking is stored alongside the assistant message (for display on
+        // reload) but is never folded into its content.
+        let history = session.history();
+        assert_eq!(history[0].reasoning, None);
+        assert_eq!(history[1].content, "answer");
+        assert_eq!(history[1].reasoning.as_deref(), Some("let me think"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_override_reaches_the_provider_request() {
+        let request = ChatRequest::new(
+            crate::config::DEFAULT_MODEL,
+            vec![ChatMessage::user("hello")],
+        )
+        .with_reasoning_effort(Some("high".into()));
+        let session = ChatSession::new(
+            core_with(FakeProvider::from_cassette(cassette_for(
+                &request,
+                vec![CoreEvent::TurnDone { usage: None }],
+            ))),
+            "test",
+        );
+        session.set_reasoning_effort(Some("high".into()));
+        assert_eq!(session.current_reasoning_effort(), Some("high".into()));
+        // A mismatch with the cassette would surface as an Error event, so
+        // reaching TurnDone proves the effort rode along on the request.
+        let handle = session.send("hello").unwrap();
+        let events = drain(handle.into_events()).await;
+        assert_eq!(events, vec![CoreEvent::TurnDone { usage: None }]);
+        session.set_reasoning_effort(None);
+        assert_eq!(session.current_reasoning_effort(), None);
+    }
+
     #[test]
     fn empty_message_is_rejected() {
         let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
@@ -1092,6 +1235,7 @@ mod tests {
             created_at: "1970-01-01T00:00:00Z".into(),
             updated_at: "1970-01-01T00:00:00Z".into(),
             model_override: None,
+            reasoning_effort_override: None,
             next_turn_id: 1,
             active: None,
             store: None,

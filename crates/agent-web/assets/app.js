@@ -14,6 +14,7 @@
   const themeBtn = $("theme-btn");
   const themeNameEl = $("theme-name");
   const modelSelect = $("model-select");
+  const effortSelect = $("effort-select");
   const fakeBadge = $("fake-badge");
   const usageBadge = $("usage-badge");
   const threadListEl = $("thread-list");
@@ -40,6 +41,8 @@
     fetchCtrl: null,
     stopped: false,
     model: null,
+    reasoningEffort: null,
+    modelEffort: {},
     fake: false,
     sticky: true,
     usage: { in: 0, out: 0 },
@@ -301,6 +304,8 @@
       state.model = payload.model;
       syncModelSelect();
     }
+    state.reasoningEffort = payload.reasoning_effort || null;
+    syncEffortSelect();
 
     messagesEl.replaceChildren();
     emptyHint = null;
@@ -309,7 +314,7 @@
       box.body.textContent = payload.summary;
     }
     for (const message of payload.history || []) {
-      renderMessage(message.role, message.content, message.html);
+      renderMessage(message.role, message.content, message.html, message.reasoning);
     }
     if ((payload.history || []).length || payload.summary) {
       scrollToBottom(true);
@@ -319,7 +324,22 @@
     renderThreadList();
   }
 
-  function renderMessage(role, content, html) {
+  /* Model thinking: a collapsible block above the answer. Shown live while a
+     turn streams, then folded away (but re-openable) once the answer starts. */
+  function thinkingBlock(text, open) {
+    const details = document.createElement("details");
+    details.className = "thinking";
+    if (open) details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "thinking";
+    const body = document.createElement("div");
+    body.className = "thinking-body";
+    body.textContent = text || "";
+    details.append(summary, body);
+    return details;
+  }
+
+  function renderMessage(role, content, html, reasoning) {
     const mine = role === "user";
     const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
     if (mine) {
@@ -329,6 +349,9 @@
       box.body.innerHTML = html;
     } else {
       box.body.textContent = content;
+    }
+    if (!mine && reasoning) {
+      box.body.prepend(thinkingBlock(reasoning, false));
     }
     return box;
   }
@@ -396,17 +419,32 @@
     state.sticky = true;
 
     const ai = addBox("kaeru", "kaeru");
+    const thinking = thinkingBlock("", true);
+    thinking.hidden = true;
+    const thinkingBody = thinking.querySelector(".thinking-body");
+    ai.body.append(thinking);
     const textNode = document.createTextNode("");
     ai.body.append(textNode);
     const cursor = document.createElement("span");
     cursor.className = "cursor";
     ai.body.append(cursor);
 
-    const turn = { text: "", usage: null, terminal: false, errorMsg: null, aborted: false };
+    const turn = {
+      text: "",
+      reasoning: "",
+      usage: null,
+      terminal: false,
+      errorMsg: null,
+      aborted: false,
+    };
     const ctrl = new AbortController();
     state.fetchCtrl = ctrl;
 
     const paint = () => {
+      if (turn.reasoning) {
+        thinking.hidden = false;
+        thinkingBody.textContent = turn.reasoning;
+      }
       textNode.data = turn.text;
       scrollToBottom();
     };
@@ -414,6 +452,8 @@
     try {
       const payload = { message, thread: state.threadId };
       if (state.model) payload.model = state.model;
+      // "" clears any per-thread override; the server then uses its default.
+      payload.reasoning_effort = state.reasoningEffort || "";
       const response = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -429,7 +469,7 @@
         const { done, value } = await reader.read();
         if (done) break;
         for (const data of parseChunk(decoder.decode(value, { stream: true }))) {
-          handleEvent(JSON.parse(data), turn, paint);
+          handleEvent(JSON.parse(data), turn, paint, thinking);
           if (turn.terminal) break;
         }
         if (turn.terminal) {
@@ -476,10 +516,17 @@
     }
   }
 
-  function handleEvent(event, turn, paint) {
+  function handleEvent(event, turn, paint, thinking) {
     switch (event.type) {
       case "delta":
         turn.text += event.text;
+        // Fold the live thinking block away once the answer starts; it stays
+        // available behind the summary triangle.
+        if (thinking && turn.reasoning && thinking.open) thinking.open = false;
+        paint();
+        break;
+      case "reasoning":
+        turn.reasoning += event.text;
         paint();
         break;
       case "turn_done":
@@ -551,32 +598,95 @@
 
   /* ---------- models ---------- */
 
+  // Keep the active model selectable even when the provider's /models list
+  // omits it (a partial or filtered list must not blank the dropdown).
+  function ensureModelOption(id) {
+    if (!id) return;
+    for (const child of modelSelect.children) {
+      if (child.value === id) return;
+    }
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id;
+    modelSelect.append(option);
+  }
+
   function syncModelSelect() {
-    if (state.model) modelSelect.value = state.model;
+    if (!state.model) return;
+    ensureModelOption(state.model);
+    modelSelect.value = state.model;
+  }
+
+  // The effort selector is shown only for models that advertise reasoning
+  // levels (else hidden); "" means "use the provider default".
+  function syncEffortSelect() {
+    const levels = state.modelEffort[state.model]?.levels || [];
+    effortSelect.replaceChildren();
+    if (!levels.length) {
+      effortSelect.hidden = true;
+      state.reasoningEffort = null;
+      return;
+    }
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "effort: default";
+    effortSelect.append(auto);
+    for (const level of levels) {
+      const option = document.createElement("option");
+      option.value = level;
+      option.textContent = `effort: ${level}`;
+      effortSelect.append(option);
+    }
+    if (state.reasoningEffort && levels.includes(state.reasoningEffort)) {
+      effortSelect.value = state.reasoningEffort;
+    } else {
+      effortSelect.value = "";
+      state.reasoningEffort = null;
+    }
+    effortSelect.hidden = false;
   }
 
   async function loadModels() {
     const response = await apiFetch("/api/models");
+    // Not fatal: the selected thread still names the active model, which
+    // syncModelSelect keeps as an option.
     if (!response.ok) return;
     const body = await response.json();
     modelSelect.replaceChildren();
+    state.modelEffort = {};
     for (const model of body.models || []) {
       const option = document.createElement("option");
       option.value = model.id;
       option.textContent = model.id;
       modelSelect.append(option);
+      state.modelEffort[model.id] = {
+        levels: model.reasoning_effort_levels || [],
+        default: model.default_reasoning_effort || null,
+      };
     }
     syncModelSelect();
+    syncEffortSelect();
   }
   modelSelect.addEventListener("change", () => {
     state.model = modelSelect.value;
+    // A new model may support a different set of effort levels.
+    state.reasoningEffort = state.modelEffort[state.model]?.default || null;
+    syncEffortSelect();
+  });
+  effortSelect.addEventListener("change", () => {
+    state.reasoningEffort = effortSelect.value || null;
   });
 
   /* ---------- bootstrap ---------- */
 
   async function bootstrap() {
     applyTheme(loadTheme());
-    await loadModels();
+    try {
+      await loadModels();
+    } catch {
+      // The model list is a nicety; a failure here must never block the
+      // threads sidebar or the chat itself.
+    }
 
     const saved = localStorage.getItem(THREAD_KEY);
     if (saved) {

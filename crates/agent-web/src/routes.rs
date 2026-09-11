@@ -75,7 +75,8 @@ pub fn router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .route_layer(middleware::from_fn(no_store_middleware));
     Router::new()
         .nest("/api", api)
         .fallback(assets::static_handler)
@@ -110,6 +111,17 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
     next.run(request).await
 }
 
+/// Every `/api/*` response is dynamic and must never be cached, so a browser
+/// (or an intermediate proxy) cannot serve a stale thread list or model list.
+async fn no_store_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /* ---------- request bodies / queries ---------- */
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +130,9 @@ struct ChatBody {
     /// Optional per-conversation model override (empty string clears it).
     #[serde(default)]
     model: Option<String>,
+    /// Optional per-conversation reasoning effort (empty string clears it).
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     /// Target thread; absent = newest thread (created on demand).
     #[serde(default)]
     thread: Option<String>,
@@ -141,7 +156,12 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
         .map(|message| {
             let html = (message.role == agent_core::Role::Assistant)
                 .then(|| crate::markdown::render(&message.content));
-            json!({ "role": message.role, "content": message.content, "html": html })
+            json!({
+                "role": message.role,
+                "content": message.content,
+                "html": html,
+                "reasoning": message.reasoning
+            })
         })
         .collect();
     json!({
@@ -149,6 +169,7 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
         "conversation": id,
         "id": id,
         "model": session.current_model(),
+        "reasoning_effort": session.current_reasoning_effort(),
         "active": session.is_active(),
         "fake": state.core.is_fake(),
         "title": session.title(),
@@ -226,6 +247,10 @@ async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) ->
     if let Some(model) = body.model.as_deref() {
         let model = model.trim();
         session.set_model((!model.is_empty()).then(|| model.to_owned()));
+    }
+    if let Some(effort) = body.reasoning_effort.as_deref() {
+        let effort = effort.trim();
+        session.set_reasoning_effort((!effort.is_empty()).then(|| effort.to_owned()));
     }
     match session.send(&body.message) {
         // Request-scoped M1 wiring (ADR-015): the SSE response owns the turn.
@@ -447,6 +472,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_responses_are_never_cacheable() {
+        let state = AppState::fake();
+        for path in ["/api/models", "/api/threads"] {
+            let (status, _, headers) = get_json(&state, path, HeaderMap::new()).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(headers["cache-control"], "no-store", "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn auth_is_enforced_when_a_token_is_configured() {
         let state = state_with_token(Some("secret-token"));
         let (status, _, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
@@ -593,6 +628,57 @@ mod tests {
         chat(&state, json!({ "message": "again", "model": "" })).await;
         let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
         assert_eq!(json["model"], agent_core::DEFAULT_MODEL);
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_is_applied_and_clearable() {
+        let state = AppState::fake();
+        chat(
+            &state,
+            json!({ "message": "hi", "reasoning_effort": "low" }),
+        )
+        .await;
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(json["reasoning_effort"], "low");
+
+        chat(
+            &state,
+            json!({ "message": "again", "reasoning_effort": "" }),
+        )
+        .await;
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(json["reasoning_effort"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn chat_surfaces_reasoning_and_persists_it_for_reload() {
+        let state = AppState::fake();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/chat",
+            Some(&json!({ "message": "hello" })),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("event: reasoning"),
+            "missing reasoning frame: {text}"
+        );
+
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        let assistant = &json["history"][1];
+        assert!(
+            assistant["reasoning"]
+                .as_str()
+                .unwrap()
+                .contains("fake provider"),
+            "reasoning not persisted: {assistant}"
+        );
     }
 
     #[tokio::test]

@@ -28,14 +28,24 @@ pub async fn static_handler(uri: Uri) -> Response {
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, mime),
-                    // Static assets are cacheable; API responses never are.
-                    (header::CACHE_CONTROL, "public, max-age=3600"),
+                    (header::CACHE_CONTROL, cache_control_for(path)),
                 ],
                 file.data.into_owned(),
             )
                 .into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Cache policy per asset kind. HTML, JS, and CSS are **never** cached: they
+/// change together and reference each other by an unversioned path, so a stale
+/// copy after a deploy pairs an old page with new scripts (or vice versa) and
+/// can leave the UI half-broken. Fonts are content-stable and safe to cache.
+fn cache_control_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "html" | "js" | "mjs" | "css" => "no-store",
+        _ => "public, max-age=3600",
     }
 }
 
@@ -117,6 +127,21 @@ mod tests {
                 .unwrap()
                 .starts_with("text/javascript")
         );
+    }
+
+    #[tokio::test]
+    async fn page_and_code_are_never_cached() {
+        // A stale page paired with fresh scripts can break the UI after a
+        // deploy, so HTML/JS/CSS must revalidate on every load.
+        for path in ["/", "/app.js", "/app.css"] {
+            let response = get(path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()["cache-control"],
+                "no-store",
+                "{path} must not be cached"
+            );
+        }
     }
 
     #[tokio::test]

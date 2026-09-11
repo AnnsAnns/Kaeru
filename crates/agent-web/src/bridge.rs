@@ -66,6 +66,16 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_frames_carry_their_name_and_full_json() {
+        let event = CoreEvent::Reasoning { text: "hmm".into() };
+        assert_eq!(event.event_name(), "reasoning");
+        assert_eq!(
+            payload(&event),
+            serde_json::json!({"type": "reasoning", "text": "hmm"})
+        );
+    }
+
+    #[test]
     fn usage_round_trips_on_turn_done() {
         let event = CoreEvent::TurnDone {
             usage: Some(Usage {

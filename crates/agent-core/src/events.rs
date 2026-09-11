@@ -22,6 +22,9 @@ pub type EventStream = tokio::sync::broadcast::Receiver<CoreEvent>;
 pub enum CoreEvent {
     /// One incremental chunk of assistant text.
     Delta { text: String },
+    /// One incremental chunk of model "thinking" (`reasoning_content`), kept
+    /// out of the conversation context and shown as a collapsible block.
+    Reasoning { text: String },
     /// The model requested a tool call [M3].
     ToolCall {
         id: String,
@@ -58,6 +61,7 @@ impl CoreEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
             Self::Delta { .. } => "delta",
+            Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::Artifact { .. } => "artifact",
@@ -132,6 +136,9 @@ mod tests {
     fn events_round_trip_through_the_wire_format() {
         let events = vec![
             CoreEvent::Delta { text: "Hel".into() },
+            CoreEvent::Reasoning {
+                text: "thinking…".into(),
+            },
             CoreEvent::ToolCall {
                 id: "call_1".into(),
                 name: "web_search".into(),

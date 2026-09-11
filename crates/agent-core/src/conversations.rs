@@ -33,6 +33,9 @@ pub struct StoredMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub tool_call_id: Option<String>,
+    /// Model thinking for this turn (display-only); absent on older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl From<&ChatMessage> for StoredMessage {
@@ -41,13 +44,16 @@ impl From<&ChatMessage> for StoredMessage {
             role: message.role,
             content: message.content.clone(),
             tool_call_id: None,
+            reasoning: message.reasoning.clone(),
         }
     }
 }
 
 impl StoredMessage {
     pub fn to_chat(&self) -> ChatMessage {
-        ChatMessage::new(self.role, self.content.clone())
+        let mut message = ChatMessage::new(self.role, self.content.clone());
+        message.reasoning = self.reasoning.clone();
+        message
     }
 }
 

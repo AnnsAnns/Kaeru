@@ -39,6 +39,11 @@ impl Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Model "thinking" for assistant turns (`reasoning_content` on
+    /// DeepSeek/OpenRouter-style providers). Display-only: it is shown in the
+    /// UI but never sent back to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl ChatMessage {
@@ -46,7 +51,14 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            reasoning: None,
         }
+    }
+
+    /// Attach model thinking to a message (assistant turns).
+    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        self.reasoning = Some(reasoning.into());
+        self
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -68,6 +80,10 @@ impl ChatMessage {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    /// Optional reasoning effort for models that support it (`reasoning_effort`
+    /// on OpenRouter/OpenAI-style providers). `None` leaves it to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl ChatRequest {
@@ -75,14 +91,37 @@ impl ChatRequest {
         Self {
             model: model.into(),
             messages,
+            reasoning_effort: None,
         }
+    }
+
+    /// Builder: request a reasoning effort; blank values are ignored.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort.filter(|e| !e.trim().is_empty());
+        self
     }
 }
 
-/// One entry of the provider's model list (ids only; that is all the UI needs).
+/// One entry of the provider's model list. `id` is what the UI needs; the
+/// optional effort levels let it offer the right reasoning choices per model
+/// (Charm Hyper reports them under `reasoning.effort_levels`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_effort_levels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
+}
+
+impl ModelInfo {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            reasoning_effort_levels: Vec::new(),
+            default_reasoning_effort: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,10 +133,12 @@ pub struct ModelInfo {
 #[derive(Debug, Serialize)]
 pub(crate) struct WireChatRequest {
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<WireChatMessage>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<WireStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl WireChatRequest {
@@ -107,11 +148,29 @@ impl WireChatRequest {
     pub(crate) fn streaming(request: &ChatRequest) -> Self {
         Self {
             model: request.model.clone(),
-            messages: request.messages.clone(),
+            messages: request.messages.iter().map(WireChatMessage::from).collect(),
             stream: true,
             stream_options: Some(WireStreamOptions {
                 include_usage: true,
             }),
+            reasoning_effort: request.reasoning_effort.clone(),
+        }
+    }
+}
+
+/// A message as sent to the provider: `role` + `content` only. Model thinking
+/// (`ChatMessage::reasoning`) is display-only and never sent back.
+#[derive(Debug, Serialize)]
+pub(crate) struct WireChatMessage {
+    pub role: Role,
+    pub content: String,
+}
+
+impl From<&ChatMessage> for WireChatMessage {
+    fn from(message: &ChatMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
         }
     }
 }
@@ -140,6 +199,21 @@ pub(crate) struct WireChoice {
 pub(crate) struct WireDelta {
     #[serde(default)]
     pub content: Option<String>,
+    /// Thinking text; DeepSeek/OpenRouter name it `reasoning_content`, other
+    /// OpenRouter models use `reasoning`.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+}
+
+impl WireDelta {
+    /// The provider's thinking chunk, preferring `reasoning_content`.
+    pub(crate) fn reasoning_text(&self) -> Option<&str> {
+        self.reasoning_content
+            .as_deref()
+            .or(self.reasoning.as_deref())
+    }
 }
 
 /// Provider usage; OpenAI names (`prompt_tokens`, `completion_tokens`).
@@ -188,6 +262,19 @@ pub(crate) struct WireCompletionChoice {
 pub(crate) struct WireMessage {
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+}
+
+impl WireMessage {
+    /// The provider's thinking text, preferring `reasoning_content`.
+    pub(crate) fn reasoning_text(&self) -> Option<&str> {
+        self.reasoning_content
+            .as_deref()
+            .or(self.reasoning.as_deref())
+    }
 }
 
 /// OpenAI-style error body: `{"error": {"message": ...}}`.
@@ -214,6 +301,24 @@ pub(crate) struct WireModelList {
 pub(crate) struct WireModel {
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<WireReasoning>,
+}
+
+/// Per-model reasoning metadata (Charm Hyper/OpenRouter style): the effort
+/// levels a model accepts and its default.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireReasoning {
+    #[serde(default)]
+    pub effort_levels: Vec<WireEffortLevel>,
+    #[serde(default)]
+    pub default_effort_level: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct WireEffortLevel {
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 #[cfg(test)]
@@ -329,6 +434,65 @@ mod tests {
             serde_json::from_str(r#"{"data":[{"id":"a","object":"model"},{"id":"b"}]}"#).unwrap();
         let ids: Vec<String> = list.data.into_iter().filter_map(|m| m.id).collect();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parses_model_reasoning_metadata() {
+        let list: WireModelList = serde_json::from_str(
+            r#"{"data":[{"id":"deepseek-v4.1-flash","reasoning":{"effort_levels":[{"value":"low","display":"Low"},{"value":"high","display":"High"}],"default_effort_level":"high"}}]}"#,
+        )
+        .unwrap();
+        let reasoning = list.data[0].reasoning.as_ref().unwrap();
+        assert_eq!(
+            reasoning
+                .effort_levels
+                .iter()
+                .filter_map(|l| l.value.clone())
+                .collect::<Vec<_>>(),
+            vec!["low", "high"]
+        );
+        assert_eq!(reasoning.default_effort_level.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn streaming_request_carries_reasoning_effort() {
+        let request = ChatRequest::new("m", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("high".into()));
+        let json = serde_json::to_value(WireChatRequest::streaming(&request)).unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+
+        // Blank effort is dropped, not sent.
+        let request = ChatRequest::new("m", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("  ".into()));
+        let json = serde_json::to_value(WireChatRequest::streaming(&request)).unwrap();
+        assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn parses_reasoning_delta_chunk() {
+        let chunk: WireChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"We need"}}]}"#)
+                .unwrap();
+        assert_eq!(chunk.choices[0].delta.reasoning_text(), Some("We need"));
+        assert_eq!(chunk.choices[0].delta.content, None);
+
+        // OpenRouter's other spelling is accepted too.
+        let chunk: WireChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"hmm"}}]}"#).unwrap();
+        assert_eq!(chunk.choices[0].delta.reasoning_text(), Some("hmm"));
+    }
+
+    #[test]
+    fn reasoning_is_not_sent_back_in_messages() {
+        let request = ChatRequest::new(
+            "m",
+            vec![ChatMessage::assistant("42").with_reasoning("17*23")],
+        );
+        let json = serde_json::to_value(WireChatRequest::streaming(&request)).unwrap();
+        assert_eq!(
+            json["messages"],
+            serde_json::json!([{"role": "assistant", "content": "42"}])
+        );
     }
 
     #[test]

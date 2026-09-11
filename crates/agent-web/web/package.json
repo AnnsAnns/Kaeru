@@ -1,0 +1,25 @@
+{
+  "name": "kaeru-web-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kaeru web client: an Astro static build (thread sidebar + Markdown chat) embedded into the agent-web binary.",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "astro": "^5.16.5",
+    "rehype-sanitize": "^6.0.0",
+    "rehype-stringify": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "unified": "^11.0.5"
+  }
+}

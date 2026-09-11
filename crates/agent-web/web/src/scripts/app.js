@@ -1,6 +1,9 @@
-/* kaeru app.js — vanilla client (C12: SSE over POST via fetch + ReadableStream).
-   No framework, no build step. Talk to /api/* only; the provider key never
-   reaches this file. */
+/* kaeru app.js — framework-free client island (C12: SSE over POST via
+   fetch + ReadableStream; C18: no runtime SPA framework). Talks to /api/*
+   only; the provider key never reaches this file. Assistant Markdown is
+   rendered to sanitized HTML by ./lib/markdown.js (ADR-025). */
+
+import { renderMarkdown } from "../lib/markdown.js";
 
 (() => {
   "use strict";
@@ -15,6 +18,10 @@
   const modelSelect = $("model-select");
   const fakeBadge = $("fake-badge");
   const usageBadge = $("usage-badge");
+  const threadListEl = $("thread-list");
+  const newThreadBtn = $("new-thread-btn");
+  const threadsBtn = $("threads-btn");
+  const workspaceEl = $("workspace");
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -28,6 +35,7 @@
   ];
   const THEME_KEY = "kaeru-theme";
   const AUTH_KEY = "kaeru-auth-token";
+  const THREAD_KEY = "kaeru-thread";
 
   const state = {
     streaming: false,
@@ -37,6 +45,8 @@
     fake: false,
     sticky: true,
     usage: { in: 0, out: 0 },
+    threadId: null,
+    threads: [],
   };
 
   /* ---------- theme (Bort switcher port: cycle + localStorage) ---------- */
@@ -143,7 +153,7 @@
   }
   function showEmptyHint() {
     const hint = addBox("kaeru", "kaeru");
-    hint.body.textContent = "hi! type something below and hit send — I stream token by token.";
+    hint.body.textContent = "hi! pick a thread or type something below and hit send — I stream token by token.";
     emptyHint = hint.box;
   }
 
@@ -173,8 +183,6 @@
     if (usage.output_tokens != null) parts.push(`${usage.output_tokens} out`);
     return parts.length ? ` · ${parts.join(" · ")}` : "";
   }
-
-  /* ---------- accumulated usage (M2) ---------- */
 
   function updateUsageBadge() {
     const parts = [];
@@ -223,6 +231,146 @@
     }
   }
 
+  /* ---------- threads (M2.5, §6.7) ---------- */
+
+  function fmtTime(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function renderThreadList() {
+    threadListEl.replaceChildren();
+    for (const thread of state.threads) {
+      const item = document.createElement("li");
+      item.className = "thread-item";
+      if (thread.id === state.threadId) item.classList.add("active");
+
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "thread-open";
+      const title = document.createElement("span");
+      title.className = "thread-title";
+      title.textContent = thread.title || "untitled";
+      const meta = document.createElement("span");
+      meta.className = "thread-meta";
+      meta.textContent = `${thread.messageCount} msg · ${fmtTime(thread.updatedAt)}`;
+      open.append(title, meta);
+      open.addEventListener("click", () => selectThread(thread.id));
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "thread-delete";
+      del.title = "Delete thread";
+      del.textContent = "🗑";
+      del.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteThread(thread.id);
+      });
+
+      item.append(open, del);
+      threadListEl.append(item);
+    }
+  }
+
+  async function loadThreads() {
+    const response = await apiFetch("/api/threads");
+    if (response.status === 401) {
+      showTokenPrompt(() => bootstrap());
+      return;
+    }
+    if (!response.ok) throw await readApiError(response);
+    const body = await response.json();
+    state.threads = body.threads || [];
+    renderThreadList();
+  }
+
+  function renderThread(payload) {
+    state.threadId = payload.id;
+    localStorage.setItem(THREAD_KEY, payload.id);
+    state.usage = {
+      in: payload.usage?.input_tokens || 0,
+      out: payload.usage?.output_tokens || 0,
+    };
+    updateUsageBadge();
+    fakeBadge.hidden = !payload.fake;
+    if (payload.model) {
+      state.model = payload.model;
+      syncModelSelect();
+    }
+
+    messagesEl.replaceChildren();
+    emptyHint = null;
+    if (payload.summary) {
+      const box = addBox("kaeru", "kaeru · summary");
+      box.body.textContent = payload.summary;
+    }
+    for (const message of payload.history || []) {
+      renderMessage(message.role, message.content);
+    }
+    if ((payload.history || []).length || payload.summary) {
+      scrollToBottom(true);
+    } else {
+      showEmptyHint();
+    }
+    renderThreadList();
+  }
+
+  function renderMessage(role, content) {
+    const mine = role === "user";
+    const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
+    if (mine) {
+      box.body.textContent = content;
+    } else {
+      box.body.classList.add("markdown");
+      box.body.innerHTML = renderMarkdown(content);
+    }
+    return box;
+  }
+
+  async function selectThread(id) {
+    if (state.streaming) await stop();
+    const response = await apiFetch(`/api/threads/${encodeURIComponent(id)}`);
+    if (response.status === 401) {
+      showTokenPrompt(() => bootstrap());
+      return;
+    }
+    if (response.status === 404) {
+      localStorage.removeItem(THREAD_KEY);
+      await bootstrap();
+      return;
+    }
+    if (!response.ok) throw await readApiError(response);
+    renderThread(await response.json());
+  }
+
+  async function createThread() {
+    if (state.streaming) await stop();
+    const response = await apiFetch("/api/threads", { method: "POST" });
+    if (!response.ok) throw await readApiError(response);
+    const body = await response.json();
+    await selectThread(body.id);
+    return body.id;
+  }
+
+  async function deleteThread(id) {
+    const response = await apiFetch(`/api/threads/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok && response.status !== 404) throw await readApiError(response);
+    const wasSelected = id === state.threadId;
+    await loadThreads();
+    if (!wasSelected) return;
+    state.threadId = null;
+    if (state.threads.length) await selectThread(state.threads[0].id);
+    else await createThread();
+  }
+
   /* ---------- chat ---------- */
 
   function setBusy(busy) {
@@ -235,6 +383,7 @@
   async function sendMessage(text) {
     const message = text.trim();
     if (!message || state.streaming) return;
+    if (!state.threadId) await createThread();
 
     composerEl.value = "";
     autosize();
@@ -247,23 +396,30 @@
     state.sticky = true;
 
     const ai = addBox("kaeru", "kaeru");
-    const textNode = document.createTextNode("");
-    ai.body.append(textNode);
+    ai.body.classList.add("markdown");
+    const md = document.createElement("div");
+    md.className = "md-content";
     const cursor = document.createElement("span");
     cursor.className = "cursor";
-    ai.body.append(cursor);
+    ai.body.append(md, cursor);
 
     const turn = { text: "", usage: null, terminal: false, errorMsg: null, aborted: false };
     const ctrl = new AbortController();
     state.fetchCtrl = ctrl;
 
-    const applyText = () => {
-      textNode.data = turn.text;
-      scrollToBottom();
+    let scheduled = false;
+    const paint = () => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        md.innerHTML = renderMarkdown(turn.text);
+        scrollToBottom();
+      });
     };
 
     try {
-      const payload = { message };
+      const payload = { message, thread: state.threadId };
       if (state.model) payload.model = state.model;
       const response = await apiFetch("/api/chat", {
         method: "POST",
@@ -280,13 +436,15 @@
         const { done, value } = await reader.read();
         if (done) break;
         for (const data of parseChunk(decoder.decode(value, { stream: true }))) {
-          handleEvent(JSON.parse(data), turn, applyText);
+          handleEvent(JSON.parse(data), turn, paint);
           if (turn.terminal) break;
         }
         if (turn.terminal) {
-          // The server closes right after the terminal event; release the
-          // connection promptly instead of waiting for the next read.
-          try { reader.cancel(); } catch { /* already closed */ }
+          try {
+            reader.cancel();
+          } catch {
+            /* already closed */
+          }
           break;
         }
       }
@@ -298,6 +456,7 @@
       }
     } finally {
       cursor.remove();
+      md.innerHTML = renderMarkdown(turn.text);
       state.fetchCtrl = null;
       setBusy(false);
 
@@ -312,14 +471,16 @@
       }
       ai.label.textContent += fmtUsage(turn.usage);
       scrollToBottom();
+      // The sidebar re-sorts by updatedAt and picks up the auto title.
+      loadThreads().catch(() => {});
     }
   }
 
-  function handleEvent(event, turn, applyText) {
+  function handleEvent(event, turn, paint) {
     switch (event.type) {
       case "delta":
         turn.text += event.text;
-        applyText();
+        paint();
         break;
       case "turn_done":
         turn.terminal = true;
@@ -348,7 +509,8 @@
     if (!state.streaming) return;
     state.stopped = true;
     try {
-      await apiFetch("/api/abort", {
+      const query = state.threadId ? `?thread=${encodeURIComponent(state.threadId)}` : "";
+      await apiFetch(`/api/abort${query}`, {
         method: "POST",
         signal: AbortSignal.timeout(2000),
       });
@@ -379,69 +541,64 @@
   });
   sendBtn.addEventListener("click", () => sendMessage(composerEl.value));
   stopBtn.addEventListener("click", stop);
+  newThreadBtn.addEventListener("click", () => {
+    createThread().catch((err) => addErrorBox(err.message || String(err)));
+  });
+  threadsBtn.addEventListener("click", () => {
+    const open = workspaceEl.classList.toggle("sidebar-open");
+    threadsBtn.setAttribute("aria-expanded", String(open));
+  });
+
+  /* ---------- models ---------- */
+
+  function syncModelSelect() {
+    if (state.model) modelSelect.value = state.model;
+  }
+
+  async function loadModels() {
+    const response = await apiFetch("/api/models");
+    if (!response.ok) return;
+    const body = await response.json();
+    modelSelect.replaceChildren();
+    for (const model of body.models || []) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.id;
+      modelSelect.append(option);
+    }
+    syncModelSelect();
+  }
+  modelSelect.addEventListener("change", () => {
+    state.model = modelSelect.value;
+  });
 
   /* ---------- bootstrap ---------- */
 
-  function renderRestored(session) {
-    if (session.summary) {
-      const box = addBox("kaeru", "kaeru · summary");
-      box.body.textContent = session.summary;
-    }
-    for (const message of session.history || []) {
-      const mine = message.role === "user";
-      const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
-      box.body.textContent = message.content;
-    }
-    if ((session.history || []).length || session.summary) {
-      removeEmptyHint();
-      scrollToBottom(true);
-    }
-  }
-
   async function bootstrap() {
     applyTheme(loadTheme());
-    showEmptyHint();
-    try {
-      const response = await apiFetch("/api/session");
+    await loadModels();
+
+    const saved = localStorage.getItem(THREAD_KEY);
+    if (saved) {
+      const response = await apiFetch(`/api/threads/${encodeURIComponent(saved)}`);
       if (response.status === 401) {
-        // Auth token required (tunnel deployments, M2): ask once per browser.
-        showTokenPrompt(bootstrap);
+        showTokenPrompt(() => bootstrap());
         return;
       }
-      const session = await response.json();
-      state.fake = Boolean(session.fake);
-      state.model = session.model || null;
-      state.usage = {
-        in: (session.usage && session.usage.input_tokens) || 0,
-        out: (session.usage && session.usage.output_tokens) || 0,
-      };
-      updateUsageBadge();
-      if (state.fake) fakeBadge.hidden = false;
-      renderRestored(session);
-      const modelResponse = await apiFetch("/api/models");
-      if (modelResponse.status === 401) {
-        showTokenPrompt(bootstrap);
+      if (response.ok) {
+        renderThread(await response.json());
+        await loadThreads();
         return;
       }
-      const { models } = await modelResponse.json();
-      const ids = models.map((m) => m.id);
-      if (state.model && !ids.includes(state.model)) ids.unshift(state.model);
-      for (const id of ids) {
-        const option = document.createElement("option");
-        option.value = id;
-        option.textContent = id;
-        if (id === state.model) option.selected = true;
-        modelSelect.append(option);
-      }
-    } catch (err) {
-      console.warn("kaeru: bootstrap failed (is the auth token set?)", err);
+      localStorage.removeItem(THREAD_KEY);
     }
-    composerEl.focus();
+
+    await loadThreads();
+    if (state.threads.length) await selectThread(state.threads[0].id);
+    else await createThread();
   }
 
-  modelSelect.addEventListener("change", () => {
-    state.model = modelSelect.value || null;
+  bootstrap().catch((err) => {
+    addErrorBox(err.message || String(err));
   });
-
-  bootstrap();
 })();

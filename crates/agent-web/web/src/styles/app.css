@@ -148,7 +148,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100dvh;
-  max-width: 860px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 4px;
 }
@@ -197,15 +197,106 @@ body {
   box-shadow: none;
 }
 
+/* ---- workspace: sidebar + messages ---- */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
 #messages {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  margin-top: 8px;
-  margin-bottom: 8px;
+  margin: 0 8px 8px 4px;
   scrollbar-width: thin;
   scrollbar-color: var(--box-color-standard) var(--base-bd-background-color);
+}
+
+/* ---- thread sidebar ---- */
+.sidebar {
+  display: none;
+  flex-direction: column;
+  width: 260px;
+  flex: 0 0 260px;
+  align-self: flex-start;
+  max-height: 100%;
+  overflow-y: auto;
+}
+.workspace.sidebar-open .sidebar {
+  display: flex;
+}
+.new-thread {
+  margin: 10px 0 4px;
+  width: calc(100% - 2px);
+}
+.thread-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.thread-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
+  background: var(--base-background-color);
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 55%, transparent);
+  padding: 2px 4px 2px 8px;
+}
+.thread-item.active {
+  --box-color-standard: var(--accent-color);
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--accent-color) 55%, transparent);
+}
+.thread-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 6px 0;
+}
+.thread-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+.thread-item.active .thread-title {
+  font-family: var(--font-headerf);
+  letter-spacing: 0.5px;
+}
+.thread-meta {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.thread-delete {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 6px;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+.thread-delete:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--box-color-standard) 40%, transparent);
 }
 
 /* ---- message boxes ---- */
@@ -224,7 +315,7 @@ body {
   line-height: 1.45;
   white-space: pre-wrap;
   text-wrap: wrap;
-  word-break: break-all;
+  word-break: break-word;
 }
 .msg.you {
   align-self: flex-end;
@@ -342,4 +433,91 @@ body {
   background: var(--accent-color);
   color: var(--accent-contrast-color);
   box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--accent-color) 50%, transparent);
+}
+
+/* ---- Markdown-rendered assistant text ---- */
+.msg-body.markdown {
+  white-space: normal;
+  word-break: normal;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-family: var(--font-headerf);
+  font-weight: normal;
+  line-height: 1.15;
+  margin: 0.6em 0 0.3em;
+}
+.markdown h1 { font-size: 1.5em; }
+.markdown h2 { font-size: 1.3em; }
+.markdown h3 { font-size: 1.15em; }
+.markdown p {
+  margin: 0.4em 0;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.markdown li {
+  margin: 0.15em 0;
+}
+.markdown a {
+  color: var(--accent-color);
+  text-underline-offset: 2px;
+}
+.markdown code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--box-color-standard) 35%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+.markdown pre {
+  background: color-mix(in srgb, var(--base-text-color) 12%, var(--base-background-color));
+  padding: 10px 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.markdown pre code {
+  background: none;
+  padding: 0;
+}
+.markdown blockquote {
+  margin: 0.4em 0;
+  padding-left: 0.8em;
+  border-left: 4px solid var(--box-color-standard);
+  opacity: 0.9;
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  display: block;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid color-mix(in srgb, var(--box-color-standard) 70%, transparent);
+  padding: 4px 8px;
+}
+.markdown hr {
+  border: none;
+  border-top: 2px solid var(--box-color-standard);
+}
+
+/* ---- desktop: sidebar is a permanent column ---- */
+@media (min-width: 900px) {
+  .sidebar {
+    display: flex;
+  }
+  .workspace.sidebar-open .sidebar {
+    display: flex;
+  }
 }

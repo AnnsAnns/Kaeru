@@ -1,3 +1,8 @@
 Bort/*
 /target
 /data
+
+# Astro web client (M2.5): build-time only, never shipped (C18).
+crates/agent-web/web/node_modules
+crates/agent-web/web/dist
+crates/agent-web/web/.astro

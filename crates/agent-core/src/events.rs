@@ -12,6 +12,9 @@ use std::task::{Context, Poll};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::error::ApiErrorKind;
 
@@ -20,9 +23,15 @@ use crate::error::ApiErrorKind;
 /// M3 completes the turn executor: a reconnect replays the events buffered so
 /// far for the active turn, then follows live. A stream with no live source
 /// and no buffered events is already closed (`RecvError::Closed`).
+///
+/// The live half is a [`BroadcastStream`], not a bare `broadcast::Receiver`:
+/// its `recv` future is kept alive across polls (inside a reusable box), so a
+/// send still wakes the task. A hand-rolled `poll_next` that creates and drops
+/// `rx.recv()` on every poll would unregister the broadcast waiter and stall
+/// the stream until the next unrelated wake-up (e.g. an SSE keep-alive tick).
 pub struct EventStream {
     replay: std::vec::IntoIter<CoreEvent>,
-    live: Option<broadcast::Receiver<CoreEvent>>,
+    live: Option<BroadcastStream<CoreEvent>>,
 }
 
 impl EventStream {
@@ -30,7 +39,7 @@ impl EventStream {
     pub fn replay(replay: Vec<CoreEvent>, live: broadcast::Receiver<CoreEvent>) -> Self {
         Self {
             replay: replay.into_iter(),
-            live: Some(live),
+            live: Some(BroadcastStream::new(live)),
         }
     }
 
@@ -39,7 +48,7 @@ impl EventStream {
     pub fn live(live: broadcast::Receiver<CoreEvent>) -> Self {
         Self {
             replay: Vec::new().into_iter(),
-            live: Some(live),
+            live: Some(BroadcastStream::new(live)),
         }
     }
 
@@ -58,7 +67,13 @@ impl EventStream {
             return Ok(event);
         }
         match self.live.as_mut() {
-            Some(rx) => rx.recv().await,
+            Some(stream) => match stream.next().await {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
+                    Err(broadcast::error::RecvError::Lagged(n))
+                }
+                None => Err(broadcast::error::RecvError::Closed),
+            },
             None => Err(broadcast::error::RecvError::Closed),
         }
     }
@@ -73,20 +88,14 @@ impl tokio_stream::Stream for EventStream {
             if let Some(event) = this.replay.next() {
                 return Poll::Ready(Some(event));
             }
-            let Some(rx) = this.live.as_mut() else {
+            let Some(live) = this.live.as_mut() else {
                 return Poll::Ready(None);
             };
-            // `broadcast::Receiver::recv` is cancel-safe, so a future polled
-            // once and dropped (on Pending) never loses a message.
-            let recv = rx.recv();
-            let mut recv = std::pin::pin!(recv);
-            match recv.as_mut().poll(cx) {
-                Poll::Ready(Ok(event)) => return Poll::Ready(Some(event)),
+            match Pin::new(live).poll_next(cx) {
+                Poll::Ready(Some(Ok(event))) => return Poll::Ready(Some(event)),
                 // A lagged consumer only loses chat text, never correctness.
-                Poll::Ready(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                Poll::Ready(Err(broadcast::error::RecvError::Closed)) => {
-                    return Poll::Ready(None);
-                }
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -362,5 +371,41 @@ mod tests {
             stream.recv().await,
             Err(broadcast::error::RecvError::Closed)
         ));
+    }
+
+    #[test]
+    fn poll_next_registers_a_waker_the_sender_can_wake() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Wake, Waker};
+        use tokio_stream::Stream as _;
+
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (tx, rx) = broadcast::channel(8);
+        let mut stream = EventStream::live(rx);
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+
+        // Empty channel: the first poll parks the task and must register the
+        // broadcast waiter. If `poll_next` dropped the recv future (the old
+        // bug), the waker below would never fire.
+        assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+        tx.send(CoreEvent::Delta { text: "x".into() }).unwrap();
+        assert!(
+            flag.0.load(Ordering::SeqCst),
+            "sender did not wake the stream"
+        );
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(CoreEvent::Delta { text })) => assert_eq!(text, "x"),
+            other => panic!("expected the queued delta, got {other:?}"),
+        }
     }
 }

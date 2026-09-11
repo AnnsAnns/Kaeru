@@ -110,12 +110,13 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   the scheduled time, so it is testable with an injected clock and never hammers
   a failure (one attempt per cycle, retried next day). Reflection writes under
   standing consent (`[reflect] enabled`), tool-free (C16), notes tagged
-  `reflect`. The reflector may also nudge `data/persona.md` (when
-  `[reflect] persona_edits`, default on): a bounded edit (growth cap +
-  absolute cap, same-character prompt) that is always recorded as a
-  `reflect, persona` memory note (why + how) and a `persona` audit entry, so it
-  is reviewable and reversible. `[workers.reflector]` uses
-  `ReflectorWorkerConfig` (1200-token default), distinct from `WorkerConfig`.
+  `reflect`. Every run also reflects on the agent's own persona: that thinking
+  is always written as a `reflect, persona` memory note (why + how). When
+  `[reflect] persona_edits` (default on) it may additionally nudge
+  `data/persona.md` — a bounded edit (growth cap + absolute cap, same-character
+  prompt) audited as `persona` (`edited`/`considered`), so it is reviewable and
+  reversible. `[workers.reflector]` uses `ReflectorWorkerConfig` (1200-token
+  default), distinct from `WorkerConfig`.
 - **M3 turn executor:** a turn runs in a background task that survives a dropped
   subscriber. `agent::Emitter` appends every event to a bounded `VecDeque`
   (`TURN_BUFFER_CAPACITY`) *and* broadcasts it; `ChatSession::subscribe()`

@@ -229,14 +229,15 @@ containing only three hyphens (---), then a concise Markdown body (a few \
 sentences). Separate multiple notes with a line containing only three equals \
 signs (===). Output only the notes, nothing else. If the day holds nothing worth \
 keeping, output a single note tagged 'reflect' with a one-line body. \
-You may, but only if the day's conversations genuinely showed you something that \
-helps and feels true to who you are, propose ONE small revision of the persona. \
-Do this rarely and keep it a nudge, never a rewrite: it must be the same \
-character, only a little more itself. If you do, append a block after your \
-notes: a line `===PERSONA===`, then a `WHY:` line (why the change helps), a \
-`HOW:` line (what you changed), a line with only three hyphens (---), then the \
-complete revised persona in Markdown, and finally a line `===END===`. Omit the \
-whole block when no change is warranted.";
+Then finish every run by reflecting on your own persona: what you noticed about \
+who you are and what, if anything, you might want to change, and why. Append a \
+block: a line `===PERSONA===`, a `WHY:` line (why it matters), a `HOW:` line \
+(what you would change), then — only if you have decided that a small change \
+genuinely helps and still feels like you — a line with only three hyphens (---) \
+followed by the complete revised persona in Markdown, and finally a line \
+`===END===`. Keep any revision a nudge, never a rewrite: the same character, \
+only a little more itself. When no change is warranted, omit the `---` and the \
+persona text and record your thoughts alone. Always include this block.";
 
 /// Build a worker spec from `[workers.<name>]`, falling back to the provider
 /// default model when the worker has none configured.

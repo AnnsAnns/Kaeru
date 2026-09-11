@@ -328,20 +328,16 @@ impl Reflector {
             self.memory.write(&note.body, &tags)?;
             written += 1;
         }
+        // Every persona reflection is recorded in memory (why + how), whether
+        // or not an actual change was applied (M4.5).
         let persona_changed = match reflection.persona {
-            Some(revision) if self.persona_edits => self.apply_persona(revision)?,
-            Some(_) => {
-                tracing::info!(
-                    target: "agent_core::reflect",
-                    "reflector proposed a persona change; persona_edits is off"
-                );
-                false
+            Some(revision) => {
+                let changed = self.record_persona(revision)?;
+                written += 1;
+                changed
             }
             None => false,
         };
-        if persona_changed {
-            written += 1; // the persona change is recorded as a memory note
-        }
         self.write_state(now)?;
         Ok(ReflectOutcome {
             status: ReflectStatus::Ran,
@@ -351,63 +347,81 @@ impl Reflector {
         })
     }
 
-    /// Apply a persona revision the reflector proposed: nudge
-    /// `data/persona.md`, record why/how as a `persona` memory note, and audit
-    /// the change. A revision that is empty, unchanged, or too large to count
-    /// as "a bit" is ignored (and reported), never written.
-    fn apply_persona(&self, revision: PersonaRevision) -> Result<bool> {
-        let Some(path) = self.core.persona_path() else {
-            return Ok(false);
-        };
+    /// Handle the reflector's persona reflection: record what it noticed and
+    /// what it might want to change as a `persona` memory note, and apply the
+    /// proposed revision to `data/persona.md` only when one is present, edits
+    /// are enabled, and it is a small, genuine change. Returns whether the file
+    /// was actually changed.
+    fn record_persona(&self, revision: PersonaRevision) -> Result<bool> {
         let current = self.core.persona().unwrap_or_default();
         let proposed = revision.persona.trim();
-        if proposed.is_empty() || proposed == current {
-            return Ok(false);
-        }
-        let new_len = proposed.chars().count();
-        let cap = if current.is_empty() {
-            PERSONA_MAX_CHARS
-        } else {
-            (current.chars().count() + PERSONA_MAX_GROWTH_CHARS).min(PERSONA_MAX_CHARS)
-        };
-        if new_len > cap {
-            tracing::warn!(
-                target: "agent_core::reflect",
-                "persona revision ignored: {new_len} chars exceeds the {cap}-char allowance"
-            );
-            return Ok(false);
-        }
+        let mut applied: Option<(usize, usize)> = None;
 
-        write_persona(path, proposed)?;
+        if !proposed.is_empty()
+            && self.persona_edits
+            && let Some(path) = self.core.persona_path()
+        {
+            if proposed == current {
+                tracing::info!(
+                    target: "agent_core::reflect",
+                    "reflector proposed an unchanged persona; recording the thought only"
+                );
+            } else {
+                let new_len = proposed.chars().count();
+                let cap = if current.is_empty() {
+                    PERSONA_MAX_CHARS
+                } else {
+                    (current.chars().count() + PERSONA_MAX_GROWTH_CHARS).min(PERSONA_MAX_CHARS)
+                };
+                if new_len <= cap {
+                    write_persona(path, proposed)?;
+                    applied = Some((current.chars().count(), new_len));
+                } else {
+                    tracing::warn!(
+                        target: "agent_core::reflect",
+                        "persona revision ignored: {new_len} chars exceeds the {cap}-char allowance"
+                    );
+                }
+            }
+        }
 
         let why = non_empty_or(revision.why.trim(), "(not given)");
         let how = non_empty_or(revision.how.trim(), "(not given)");
-        let note = format!(
-            "I revised my persona during my evening reflection.\n\n\
-             Why: {why}\n\n\
-             How: {how}\n\n\
-             (persona changed from {} to {new_len} characters)",
-            current.chars().count()
-        );
+        let note = match applied {
+            Some((previous, new)) => format!(
+                "I revised my persona during my evening reflection.\n\n\
+                 Why: {why}\n\n\
+                 How: {how}\n\n\
+                 (persona changed from {previous} to {new} characters)"
+            ),
+            None => format!(
+                "I reflected on my persona during my evening reflection.\n\n\
+                 Why: {why}\n\n\
+                 How: {how}\n\n\
+                 (I left my persona unchanged for now.)"
+            ),
+        };
         self.memory
             .write(&note, &[REFLECT_TAG.to_owned(), PERSONA_TAG.to_owned()])?;
         self.core.audit().append(&AuditEntry {
             turn_id: 0,
             tool: PERSONA_TAG.to_owned(),
             input: json!({
-                "previousChars": current.chars().count(),
-                "newChars": new_len,
+                "applied": applied.is_some(),
+                "previousChars": applied.map(|(previous, _)| previous).unwrap_or_else(|| current.chars().count()),
+                "newChars": applied.map(|(_, new)| new),
             }),
             decision: None,
             model: None,
-            status: "ok".to_owned(),
+            status: if applied.is_some() { "edited" } else { "considered" }.to_owned(),
             duration_ms: 0,
         });
         tracing::info!(
             target: "agent_core::reflect",
-            "revised persona during reflection: {why}"
+            "persona reflection recorded (applied: {})",
+            applied.is_some()
         );
-        Ok(true)
+        Ok(applied.is_some())
     }
 
     /// Persist the run time atomically (tmp + rename).
@@ -513,17 +527,17 @@ fn parse_reflection(text: &str) -> Reflection {
     reflection
 }
 
-/// Parse the inside of a persona block: `WHY:`/`HOW:` lines, `---`, then the
-/// complete revised persona.
+/// Parse the inside of a persona block: `WHY:`/`HOW:` lines describing the
+/// reflection, an optional `---`, then an optional complete revised persona.
+///
+/// A block with only the reasoning (no revision) is a persona *reflection*: it
+/// is recorded in memory but changes nothing. Returns `None` only when the
+/// block holds nothing at all.
 fn parse_persona_block(block: &str) -> Option<PersonaRevision> {
     let (meta, persona) = match block.split_once("\n---") {
-        Some((meta, persona)) => (meta, persona),
-        None => return None,
+        Some((meta, persona)) => (meta, persona.trim().to_owned()),
+        None => (block, String::new()),
     };
-    let persona = persona.trim();
-    if persona.is_empty() {
-        return None;
-    }
     let mut why = String::new();
     let mut how = String::new();
     for line in meta.lines() {
@@ -540,11 +554,10 @@ fn parse_persona_block(block: &str) -> Option<PersonaRevision> {
             how = value.trim().to_owned();
         }
     }
-    Some(PersonaRevision {
-        why,
-        how,
-        persona: persona.to_owned(),
-    })
+    if why.is_empty() && how.is_empty() && persona.is_empty() {
+        return None;
+    }
+    Some(PersonaRevision { why, how, persona })
 }
 
 fn parse_segment(segment: &str) -> Option<ReflectedNote> {
@@ -791,16 +804,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_reflection_ignores_unterminated_or_empty_persona_blocks() {
+    fn parse_reflection_handles_unterminated_and_consideration_only_persona_blocks() {
+        // An unterminated block is ignored; regular notes still count.
         let text = "frogs\n---\nA note\n===PERSONA===\nWHY: x\n---\nno end marker\n";
         let reflection = parse_reflection(text);
         assert_eq!(reflection.notes.len(), 1);
         assert!(reflection.persona.is_none());
 
-        let text = "frogs\n---\nA note\n===PERSONA===\nWHY: x\n---\n===END===\n";
+        // A block with only the reasoning is a reflection: no revision.
+        let text = "frogs\n---\nA note\n===PERSONA===\nWHY: x\nHOW: still thinking\n===END===\n";
         let reflection = parse_reflection(text);
         assert_eq!(reflection.notes.len(), 1);
-        assert!(reflection.persona.is_none());
+        let revision = reflection.persona.expect("consideration parsed");
+        assert_eq!(revision.why, "x");
+        assert_eq!(revision.how, "still thinking");
+        assert!(revision.persona.is_empty());
     }
 
     #[test]
@@ -995,7 +1013,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persona_revision_is_ignored_when_disabled() {
+    async fn persona_consideration_only_is_recorded_without_changing_the_file() {
+        let dir = temp_dir("persona-think");
+        let conversations = ConversationStore::new(dir.join("conversations"));
+        conversations
+            .save(&conversation(
+                "t1",
+                "2099-01-01T10:00:00Z",
+                vec![("user", "hi"), ("assistant", "hello")],
+            ))
+            .unwrap();
+        let persona_path = dir.join("persona.md");
+        std::fs::write(&persona_path, "I am a pond frog.\n").unwrap();
+
+        let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
+        let request = ChatRequest::new(
+            config.provider.model.clone(),
+            vec![
+                ChatMessage::system(REFLECTOR_SYSTEM),
+                ChatMessage::user(digest_content_with_persona(
+                    &conversations,
+                    Some("I am a pond frog."),
+                )),
+            ],
+        )
+        .with_max_tokens(Some(config.workers.reflector.max_output_tokens));
+        // A block with only WHY/HOW: a reflection, no revision.
+        let cassette = Cassette {
+            cassette_version: crate::llm::CASSETTE_VERSION,
+            recorded_at_unix: None,
+            base_url: None,
+            models: vec![],
+            interactions: vec![Interaction {
+                request,
+                events: vec![
+                    CoreEvent::Delta {
+                        text: "frogs\n---\nA note\n===PERSONA===\nWHY: I noticed I can be terse\nHOW: maybe soften my tone someday\n===END===\n"
+                            .into(),
+                    },
+                    CoreEvent::TurnDone { usage: None },
+                ],
+            }],
+        };
+        let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
+        let core = Arc::new(
+            AgentCore::with_mode(
+                config,
+                client,
+                crate::llm::ClientMode::Fake {
+                    cassette: PathBuf::new(),
+                },
+            )
+            .with_persona(persona_path.clone()),
+        );
+        let reflector = Reflector::new(
+            core,
+            MemoryStore::new(dir.join("memory")),
+            conversations,
+            dir.join("reflect-state.json"),
+        );
+
+        let outcome = reflector.run_now(2_000_000_000).await.unwrap();
+        assert!(!outcome.persona_changed);
+        assert_eq!(outcome.notes, 2);
+        let updated = std::fs::read_to_string(&persona_path).unwrap();
+        assert_eq!(updated, "I am a pond frog.\n", "file untouched");
+
+        let notes = reflector.memory.list();
+        let persona_note = notes
+            .iter()
+            .find(|note| note.tags.iter().any(|tag| tag == PERSONA_TAG))
+            .expect("the persona reflection was recorded");
+        assert!(persona_note.content.contains("I noticed I can be terse"));
+        assert!(persona_note.content.contains("soften my tone someday"));
+        assert!(persona_note.content.contains("left my persona unchanged"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn persona_edits_disabled_records_the_reflection_but_not_the_change() {
         let dir = temp_dir("persona-off");
         let conversations = ConversationStore::new(dir.join("conversations"));
         conversations
@@ -1056,16 +1152,15 @@ mod tests {
 
         let outcome = reflector.run_now(2_000_000_000).await.unwrap();
         assert!(!outcome.persona_changed);
-        assert_eq!(outcome.notes, 1);
+        assert_eq!(outcome.notes, 2, "the reflection note is still recorded");
         let updated = std::fs::read_to_string(&persona_path).unwrap();
         assert_eq!(updated, "I am a pond frog.\n", "persona untouched");
-        assert!(
-            !reflector
-                .memory
-                .list()
-                .iter()
-                .any(|note| note.tags.iter().any(|tag| tag == PERSONA_TAG))
-        );
+        let notes = reflector.memory.list();
+        let persona_note = notes
+            .iter()
+            .find(|note| note.tags.iter().any(|tag| tag == PERSONA_TAG))
+            .expect("the persona reflection was still recorded");
+        assert!(persona_note.content.contains("left my persona unchanged"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

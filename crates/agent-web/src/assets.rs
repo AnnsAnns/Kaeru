@@ -78,7 +78,7 @@ mod tests {
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("kaeru"));
+        assert!(html.contains("Kaeru"));
         assert!(html.contains("/app.js"));
     }
 

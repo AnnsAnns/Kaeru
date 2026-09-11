@@ -1,9 +1,7 @@
-/* kaeru app.js — framework-free client island (C12: SSE over POST via
-   fetch + ReadableStream; C18: no runtime SPA framework). Talks to /api/*
-   only; the provider key never reaches this file. Assistant Markdown is
-   rendered to sanitized HTML by ./lib/markdown.js (ADR-025). */
-
-import { renderMarkdown } from "../lib/markdown.js";
+/* kaeru app.js — vanilla client, no build step (C12: SSE over POST via
+   fetch + ReadableStream). Talks to /api/* only; the provider key never
+   reaches this file. Assistant Markdown is rendered to sanitized HTML by the
+   server (ADR-026), so this file never parses Markdown. */
 
 (() => {
   "use strict";
@@ -311,7 +309,7 @@ import { renderMarkdown } from "../lib/markdown.js";
       box.body.textContent = payload.summary;
     }
     for (const message of payload.history || []) {
-      renderMessage(message.role, message.content);
+      renderMessage(message.role, message.content, message.html);
     }
     if ((payload.history || []).length || payload.summary) {
       scrollToBottom(true);
@@ -321,14 +319,16 @@ import { renderMarkdown } from "../lib/markdown.js";
     renderThreadList();
   }
 
-  function renderMessage(role, content) {
+  function renderMessage(role, content, html) {
     const mine = role === "user";
     const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
     if (mine) {
       box.body.textContent = content;
-    } else {
+    } else if (html) {
       box.body.classList.add("markdown");
-      box.body.innerHTML = renderMarkdown(content);
+      box.body.innerHTML = html;
+    } else {
+      box.body.textContent = content;
     }
     return box;
   }
@@ -396,26 +396,19 @@ import { renderMarkdown } from "../lib/markdown.js";
     state.sticky = true;
 
     const ai = addBox("kaeru", "kaeru");
-    ai.body.classList.add("markdown");
-    const md = document.createElement("div");
-    md.className = "md-content";
+    const textNode = document.createTextNode("");
+    ai.body.append(textNode);
     const cursor = document.createElement("span");
     cursor.className = "cursor";
-    ai.body.append(md, cursor);
+    ai.body.append(cursor);
 
     const turn = { text: "", usage: null, terminal: false, errorMsg: null, aborted: false };
     const ctrl = new AbortController();
     state.fetchCtrl = ctrl;
 
-    let scheduled = false;
     const paint = () => {
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        md.innerHTML = renderMarkdown(turn.text);
-        scrollToBottom();
-      });
+      textNode.data = turn.text;
+      scrollToBottom();
     };
 
     try {
@@ -456,7 +449,6 @@ import { renderMarkdown } from "../lib/markdown.js";
       }
     } finally {
       cursor.remove();
-      md.innerHTML = renderMarkdown(turn.text);
       state.fetchCtrl = null;
       setBusy(false);
 
@@ -468,6 +460,14 @@ import { renderMarkdown } from "../lib/markdown.js";
         ai.label.textContent = "kaeru · stopped";
       } else if (!turn.terminal) {
         ai.label.textContent = "kaeru · connection lost";
+      } else {
+        // Completed: swap the streamed plain text for the server's rendered
+        // HTML (the same renderer used on reload).
+        try {
+          await selectThread(state.threadId);
+        } catch {
+          /* keep the plain-text fallback already on screen */
+        }
       }
       ai.label.textContent += fmtUsage(turn.usage);
       scrollToBottom();

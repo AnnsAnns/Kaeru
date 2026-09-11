@@ -1,21 +1,18 @@
 //! Embedded static assets (C13: single binary).
 //!
-//! The web client is an **Astro** project under `crates/agent-web/web/`
-//! (M2.5, ADR-023): `web/src/` is authored, `npm run build` emits `web/dist/`,
-//! and rust-embed compiles that directory into the binary. Node is never
-//! needed at runtime (C18). Editing `web/src/` therefore needs the Astro build
-//! *and* a Rust rebuild — a plain `cargo build` embeds the previous `dist/`.
-//!
-//! The design language (tokens, box recipe, fonts) is a hand-ported snapshot
-//! of the owner's blog — see arc42 Appendix E; the `Bort/` folder itself is
-//! never imported (C17).
+//! `index.html`, `app.js`, `app.css` and the self-hosted Bort fonts are
+//! compiled into the binary via rust-embed — no build step, no Node. Assistant
+//! Markdown is rendered to sanitized HTML on the server (`markdown.rs`,
+//! ADR-026), so the client never parses Markdown. The design language (tokens,
+//! box recipe, fonts) is a hand-ported snapshot of the owner's blog — see
+//! arc42 Appendix E; the `Bort/` folder itself is never imported (C17).
 
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "web/dist/"]
+#[folder = "assets/"]
 struct Assets;
 
 /// Serve embedded files; unknown paths are a plain 404. Path traversal is
@@ -74,8 +71,7 @@ mod tests {
         app.oneshot(request).await.unwrap()
     }
 
-    /// First embedded file with the given extension, for hashed `_astro/*`
-    /// names that the build assigns.
+    /// First embedded file with the given extension.
     fn embedded_with_extension(ext: &str) -> Option<String> {
         Assets::iter()
             .find(|name| name.ends_with(ext))
@@ -83,7 +79,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_serves_the_astro_shell() {
+    async fn root_serves_the_chat_shell() {
         let response = get("/").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(

@@ -17,19 +17,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The web client is build-time only (C18): build it first so rust-embed
-      # finds `web/dist/`. Node never ships and is absent from the binary.
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/agent-web/web/.nvmrc
-          cache: npm
-          cache-dependency-path: crates/agent-web/web/package-lock.json
-      - name: Web client install
-        run: npm ci --prefix crates/agent-web/web
-      - name: Web client build (Astro -> web/dist)
-        run: npm run build --prefix crates/agent-web/web
-      - name: Web client tests (Markdown sanitization fixtures)
-        run: npm test --prefix crates/agent-web/web
       - name: Format
         run: cargo fmt --all --check
       - name: Lint

@@ -122,12 +122,14 @@ fn main() {
         );
     }
 
+    let memory = MemoryStore::new(cli.paths.memory.clone());
     let core = match AgentCore::connect(config.clone(), mode) {
         Ok(core) => Arc::new(
             core.with_tools(ToolRegistry::with_defaults(
                 config.search.max_results,
-                Some(MemoryStore::new(cli.paths.memory.clone())),
+                Some(memory.clone()),
             ))
+            .with_memory(memory)
             .with_audit(AuditLog::new(cli.paths.audit.clone())),
         ),
         Err(err) => {

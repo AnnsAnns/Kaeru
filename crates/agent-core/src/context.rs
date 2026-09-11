@@ -2,9 +2,10 @@
 //!
 //! Prompt assembly is a fixed pipeline, never a heuristic:
 //!
-//! 1. system prompt (none in M2; memory block joins at M4)
-//! 2. rolling summary (a system message once the budget was exceeded)
-//! 3. the recent message window
+//! 1. system prompt (none yet; memory block joins the run at M4)
+//! 2. injected memory block (selected durable notes, budgeted, M4)
+//! 3. rolling summary (a system message once the budget was exceeded)
+//! 4. the recent message window
 //!
 //! Overflow is resolved *before* the provider call: the oldest turns fall
 //! out of the window and are folded into the summary by one bounded LLM
@@ -40,19 +41,22 @@ impl ContextPolicy {
 }
 
 /// Split the history into `(window, dropped)` under the budget (minus what
-/// the summary will cost). The trailing message is always kept — even when
-/// it alone exceeds the budget — and the window is aligned to start at a
-/// `user` message so pairs stay coherent.
+/// the summary and the injected memory block will cost). The trailing message
+/// is always kept — even when it alone exceeds the budget — and the window is
+/// aligned to start at a `user` message so pairs stay coherent.
 pub fn split_window(
     policy: ContextPolicy,
     summary: Option<&str>,
+    memory_tokens: u64,
     history: &[ChatMessage],
 ) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
     let summary_tokens = summary
         .filter(|s| !s.is_empty())
         .map(ContextPolicy::estimate_tokens)
         .unwrap_or(0);
-    let budget = policy.max_prompt_tokens.saturating_sub(summary_tokens);
+    let budget = policy
+        .max_prompt_tokens
+        .saturating_sub(summary_tokens + memory_tokens);
 
     let mut used = 0u64;
     let mut start = history.len();
@@ -80,17 +84,21 @@ pub fn split_window(
     )
 }
 
-/// Assemble the provider-bound messages: optional system prompt, summary as
-/// a system message, then the window. (Memory joins between system and
-/// summary at M4.)
+/// Assemble the provider-bound messages: optional system prompt, the injected
+/// memory block, the summary as a system message, then the window. The order is
+/// fixed by ADR-018 (system → memory → summary → window).
 pub fn assemble(
     system: Option<&str>,
+    memory: Option<&str>,
     summary: Option<&str>,
     window: &[ChatMessage],
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     if let Some(system) = system.filter(|s| !s.is_empty()) {
         messages.push(ChatMessage::system(system));
+    }
+    if let Some(memory) = memory.filter(|m| !m.is_empty()) {
+        messages.push(ChatMessage::system(memory));
     }
     if let Some(summary) = summary.filter(|s| !s.is_empty()) {
         messages.push(ChatMessage::system(format!(
@@ -240,7 +248,7 @@ mod tests {
     #[test]
     fn short_history_fits_entirely() {
         let history = turn("hello", "Hello!");
-        let (window, dropped) = split_window(policy(100), None, &history);
+        let (window, dropped) = split_window(policy(100), None, 0, &history);
         assert_eq!(window, history);
         assert!(dropped.is_empty());
     }
@@ -252,7 +260,7 @@ mod tests {
             history.extend(turn(&format!("question {i} "), "a fairly long answer "));
         }
         history.push(ChatMessage::user("the new question"));
-        let (window, dropped) = split_window(policy(20), None, &history);
+        let (window, dropped) = split_window(policy(20), None, 0, &history);
         assert!(
             !dropped.is_empty(),
             "a history this size must overflow a 20-token budget"
@@ -266,7 +274,7 @@ mod tests {
     #[test]
     fn a_single_huge_message_still_goes_through() {
         let history = vec![ChatMessage::user("a huge message far over any tiny budget")];
-        let (window, dropped) = split_window(policy(1), None, &history);
+        let (window, dropped) = split_window(policy(1), None, 0, &history);
         assert_eq!(window, history);
         assert!(dropped.is_empty());
     }
@@ -278,16 +286,51 @@ mod tests {
             ChatMessage::assistant("Hello!"),
             ChatMessage::user("again"),
         ];
-        let (window, dropped) = split_window(policy(1), Some("summary text"), &history);
+        let (window, dropped) = split_window(policy(1), Some("summary text"), 0, &history);
         // The summary alone exceeds the budget: only the trailing turn survives.
         assert_eq!(window, vec![ChatMessage::user("again")]);
         assert_eq!(dropped.len(), 2);
     }
 
     #[test]
+    fn injected_memory_spends_budget_like_the_summary() {
+        let history = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("Hello!"),
+            ChatMessage::user("again"),
+        ];
+        // 2 tokens of memory is enough to push the first turn out.
+        let (window, dropped) = split_window(policy(4), None, 2, &history);
+        assert_eq!(window, vec![ChatMessage::user("again")]);
+        assert_eq!(dropped.len(), 2);
+    }
+
+    #[test]
+    fn assemble_places_system_then_memory_then_summary_then_window() {
+        let window = vec![ChatMessage::user("hi")];
+        let messages = assemble(
+            Some("be helpful"),
+            Some("Durable memory notes:\n- [2026-09-10] a fact"),
+            Some("so far: greetings"),
+            &window,
+        );
+        assert_eq!(
+            messages,
+            vec![
+                ChatMessage::system("be helpful"),
+                ChatMessage::system("Durable memory notes:\n- [2026-09-10] a fact"),
+                ChatMessage::system(
+                    "Summary of the earlier part of this conversation (older turns were compacted):\nso far: greetings"
+                ),
+                ChatMessage::user("hi"),
+            ]
+        );
+    }
+
+    #[test]
     fn assemble_places_system_then_summary_then_window() {
         let window = vec![ChatMessage::user("hi")];
-        let messages = assemble(Some("be helpful"), Some("so far: greetings"), &window);
+        let messages = assemble(Some("be helpful"), None, Some("so far: greetings"), &window);
         assert_eq!(
             messages,
             vec![
@@ -302,9 +345,9 @@ mod tests {
 
     #[test]
     fn assemble_skips_empty_pieces() {
-        let messages = assemble(None, None, &[]);
+        let messages = assemble(None, None, None, &[]);
         assert!(messages.is_empty());
-        let messages = assemble(Some(""), Some(""), &[]);
+        let messages = assemble(Some(""), Some(""), Some(""), &[]);
         assert!(messages.is_empty());
     }
 

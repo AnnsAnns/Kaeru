@@ -6,7 +6,7 @@ pub mod r#loop;
 pub mod workers;
 
 pub use r#loop::{LoopResult, TurnInput, TurnOutcome, run};
-pub use workers::{SUMMARIZER_SYSTEM, WorkerOutput, WorkerSpec, Workers};
+pub use workers::{DISTILLER_SYSTEM, SUMMARIZER_SYSTEM, WorkerOutput, WorkerSpec, Workers};
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

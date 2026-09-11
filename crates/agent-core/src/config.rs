@@ -82,6 +82,12 @@ max_results = 5
 [workers.summarizer]
 model = ""
 max_output_tokens = 600
+
+# The distiller tidies memory candidates before they are saved: it produces a
+# short note plus tags (M4). An empty model uses the provider default.
+[workers.distiller]
+model = ""
+max_output_tokens = 600
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,12 +237,14 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Worker registry configuration (M3: the summarizer; M4 adds the distiller).
+/// Worker registry configuration (the summarizer, M3; the distiller, M4).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkersConfig {
     #[serde(default)]
     pub summarizer: WorkerConfig,
+    #[serde(default)]
+    pub distiller: WorkerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -405,6 +413,10 @@ impl Config {
         if config.workers.summarizer.max_output_tokens == 0 {
             config.workers.summarizer.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
         }
+        config.workers.distiller.model = config.workers.distiller.model.trim().to_owned();
+        if config.workers.distiller.max_output_tokens == 0 {
+            config.workers.distiller.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
+        }
         if config.agent.max_steps == 0 {
             config.agent.max_steps = DEFAULT_MAX_STEPS;
         }
@@ -537,6 +549,11 @@ model = "llama3"
         assert_eq!(config.workers.summarizer.model, "");
         assert_eq!(
             config.workers.summarizer.max_output_tokens,
+            DEFAULT_WORKER_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(config.workers.distiller.model, "");
+        assert_eq!(
+            config.workers.distiller.max_output_tokens,
             DEFAULT_WORKER_MAX_OUTPUT_TOKENS
         );
 

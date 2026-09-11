@@ -1,4 +1,5 @@
 //! HTTP surface: `/api/threads*`, `/api/chat` (SSE), `/api/abort`,
+//! `/api/regenerate`, `/api/stream`, `/api/approval`, `/api/memory`,
 //! `/api/models`, and the `/api/session` compatibility alias, plus embedded
 //! static assets. Static assets are public and cacheable; every `/api/*`
 //! route goes through the `X-Auth-Token` check when a token is configured,
@@ -75,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         .route("/approval", post(post_approval))
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
+        .route("/memory", get(list_memory))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -145,6 +147,13 @@ struct ChatBody {
 struct ThreadQuery {
     #[serde(default)]
     thread: Option<String>,
+}
+
+/// Optional free-text filter for the memory browser (M4).
+#[derive(Debug, Default, Deserialize)]
+struct MemoryQuery {
+    #[serde(default)]
+    q: Option<String>,
 }
 
 /// Consent decision for a pending `ApprovalRequest` (M3).
@@ -384,6 +393,33 @@ async fn delete_thread(State(state): State<AppState>, Path(id): Path<String>) ->
     }
 }
 
+/// The memory browser (M4): durable notes, newest first, optionally filtered
+/// by a free-text `?q=`. Read-only; writes still go through the consent-gated
+/// `memory_write` tool.
+async fn list_memory(State(state): State<AppState>, Query(query): Query<MemoryQuery>) -> Response {
+    let Some(store) = state.core.memory() else {
+        return Json(json!({ "configured": false, "count": 0, "notes": [] })).into_response();
+    };
+    let notes = match query.q.as_deref().map(str::trim) {
+        Some(q) if !q.is_empty() => store.search(q, 50),
+        _ => store.list().into_iter().take(200).collect(),
+    };
+    let notes: Vec<serde_json::Value> = notes
+        .into_iter()
+        .map(|note| {
+            json!({
+                "day": note.day,
+                "slug": note.slug,
+                "tags": note.tags,
+                "created": note.created,
+                "content": note.content,
+                "modified": note.modified_unix,
+            })
+        })
+        .collect();
+    Json(json!({ "configured": true, "count": notes.len(), "notes": notes })).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +557,50 @@ mod tests {
                 .unwrap()
                 .contains("fake provider")
         );
+    }
+
+    #[tokio::test]
+    async fn memory_endpoint_is_empty_when_no_store_is_configured() {
+        let state = AppState::fake();
+        let (status, json, _) = get_json(&state, "/api/memory", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["configured"], false);
+        assert!(json["notes"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_endpoint_lists_and_searches_notes() {
+        let dir = std::env::temp_dir().join(format!("kaeru-web-memory-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let store = agent_core::MemoryStore::new(dir.join("memory"));
+        store
+            .write("frogs are amphibians", &["animals".into()])
+            .unwrap();
+        store.write("rust ownership", &["rust".into()]).unwrap();
+        let core = Arc::new(
+            AgentCore::with_mode(
+                Config::default(),
+                Arc::new(FakeProvider::builtin()),
+                agent_core::ClientMode::Fake {
+                    cassette: std::path::PathBuf::new(),
+                },
+            )
+            .with_memory(store.clone()),
+        );
+        let state = AppState::with_core(core);
+
+        let (status, json, _) = get_json(&state, "/api/memory", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["configured"], true);
+        assert_eq!(json["count"], 2);
+
+        let (status, json, _) = get_json(&state, "/api/memory?q=frogs", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        let notes = json["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0]["content"].as_str().unwrap().contains("frogs"));
+        assert_eq!(notes[0]["tags"][0], "animals");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

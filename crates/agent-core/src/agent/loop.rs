@@ -36,6 +36,9 @@ pub struct TurnInput {
     /// The recent message window (already budget-checked by the session).
     pub window: Vec<ChatMessage>,
     pub summary: Option<String>,
+    /// Budgeted memory block injected between the system prompt and the
+    /// summary (M4, ADR-018/ADR-007).
+    pub memory: Option<String>,
     pub emitter: Emitter,
     /// Assistant text streamed so far (whole turn); read by `abort`.
     pub partial: Arc<Mutex<String>>,
@@ -66,6 +69,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
         reasoning_effort,
         window,
         summary,
+        memory,
         emitter,
         partial,
         reasoning,
@@ -77,7 +81,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
 
     let tools: ToolRegistry = core.tools().clone();
     let tool_schemas = tools.schemas();
-    let mut messages = context::assemble(None, summary.as_deref(), &window);
+    let mut messages = context::assemble(None, memory.as_deref(), summary.as_deref(), &window);
     let mut new_messages: Vec<ChatMessage> = Vec::new();
     let mut total_usage = Usage::default();
     let mut saw_usage = false;

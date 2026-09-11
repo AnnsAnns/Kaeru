@@ -17,6 +17,7 @@ pub mod conversations;
 pub mod error;
 pub mod events;
 pub mod llm;
+pub mod memory;
 pub mod search;
 pub mod session;
 pub mod tools;
@@ -43,9 +44,10 @@ pub use llm::{
     CASSETTE_VERSION, Cassette, ChatMessage, ChatRequest, ClientMode, FakeProvider, HttpClient,
     Interaction, LlmClient, ModelInfo, RecordingClient, Role, ToolCall,
 };
+pub use memory::{MemoryNote, MemoryStore, memory_block};
 pub use search::{DisabledSearch, FakeSearch, SearchProvider, SearchResult};
 pub use session::{ChatSession, ConversationRegistry, ThreadSummary, TurnHandle};
-pub use tools::{MemoryStore, Tool, ToolContext, ToolRegistry};
+pub use tools::{Tool, ToolContext, ToolRegistry};
 
 /// Shared core: configuration, the provider client, the tool registry, the
 /// search provider, the worker registry, and the audit log.
@@ -60,6 +62,7 @@ pub struct AgentCore {
     search: Arc<dyn SearchProvider>,
     workers: Arc<Workers>,
     audit: AuditLog,
+    memory: Option<MemoryStore>,
 }
 
 impl AgentCore {
@@ -84,6 +87,7 @@ impl AgentCore {
             search: Arc::new(DisabledSearch),
             workers,
             audit: AuditLog::disabled(),
+            memory: None,
         }
     }
 
@@ -107,6 +111,7 @@ impl AgentCore {
             search,
             workers,
             audit: AuditLog::disabled(),
+            memory: None,
         })
     }
 
@@ -136,6 +141,17 @@ impl AgentCore {
 
     pub fn audit(&self) -> &AuditLog {
         &self.audit
+    }
+
+    /// The memory store, when one is configured (M4).
+    pub fn memory(&self) -> Option<&MemoryStore> {
+        self.memory.as_ref()
+    }
+
+    /// Attach the memory store (M4). Also add its tools via `with_tools`.
+    pub fn with_memory(mut self, memory: MemoryStore) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     /// Replace the tool registry (the M3 default set: web_search, memory_write).

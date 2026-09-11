@@ -22,6 +22,11 @@
   const newThreadBtn = $("new-thread-btn");
   const threadsBtn = $("threads-btn");
   const workspaceEl = $("workspace");
+  const memoryBtn = $("memory-btn");
+  const memoryFormEl = $("memory-search");
+  const memoryQueryEl = $("memory-query");
+  const memoryListEl = $("memory-list");
+  const memoryEmptyEl = $("memory-empty");
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -708,6 +713,8 @@
           state.usage.out += event.usage.output_tokens || 0;
           updateUsageBadge();
         }
+        // A memory_write may just have landed; keep an open browser fresh.
+        refreshMemoryIfOpen();
         break;
       case "error":
         turn.terminal = true;
@@ -767,6 +774,69 @@
   threadsBtn.addEventListener("click", () => {
     const open = workspaceEl.classList.toggle("sidebar-open");
     threadsBtn.setAttribute("aria-expanded", String(open));
+  });
+
+  /* ---------- memory browser (M4) ---------- */
+
+  function renderMemory(notes) {
+    memoryListEl.replaceChildren();
+    memoryEmptyEl.hidden = notes.length > 0;
+    for (const note of notes) {
+      const item = document.createElement("li");
+      item.className = "memory-note";
+      const head = document.createElement("div");
+      head.className = "memory-note-head";
+      const day = document.createElement("span");
+      day.textContent = note.day;
+      head.append(day);
+      for (const tag of note.tags || []) {
+        const tagEl = document.createElement("span");
+        tagEl.className = "memory-tag";
+        tagEl.textContent = `#${tag}`;
+        head.append(tagEl);
+      }
+      const body = document.createElement("p");
+      body.className = "memory-note-body";
+      body.textContent = note.content || "";
+      item.append(head, body);
+      memoryListEl.append(item);
+    }
+  }
+
+  async function loadMemory(query) {
+    const path = query
+      ? `/api/memory?q=${encodeURIComponent(query)}`
+      : "/api/memory";
+    const response = await apiFetch(path);
+    if (response.status === 401) {
+      showTokenPrompt(() => loadMemory(query));
+      return;
+    }
+    if (!response.ok) throw await readApiError(response);
+    const body = await response.json();
+    renderMemory(body.notes || []);
+  }
+
+  function refreshMemoryIfOpen() {
+    if (workspaceEl.classList.contains("memory-open")) {
+      loadMemory(memoryQueryEl.value.trim()).catch(() => {});
+    }
+  }
+
+  memoryBtn.addEventListener("click", () => {
+    const open = workspaceEl.classList.toggle("memory-open");
+    memoryBtn.setAttribute("aria-expanded", String(open));
+    if (open) {
+      loadMemory(memoryQueryEl.value.trim()).catch((err) =>
+        addErrorBox(err.message || String(err)),
+      );
+    }
+  });
+  memoryFormEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    loadMemory(memoryQueryEl.value.trim()).catch((err) =>
+      addErrorBox(err.message || String(err)),
+    );
   });
 
   /* ---------- models ---------- */

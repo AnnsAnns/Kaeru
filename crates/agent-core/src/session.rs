@@ -752,11 +752,28 @@ async fn run_turn(task: TurnTask) {
         approvals,
     } = task;
 
+    // Memory injection (M4, ADR-007): select a bounded block of durable notes
+    // relevant to the newest user message and account for it in the budget.
+    let memory = core.memory().and_then(|store| {
+        let query = history
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::llm::Role::User)
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        crate::memory::memory_block(store, query)
+    });
+    let memory_tokens = memory
+        .as_deref()
+        .map(ContextPolicy::estimate_tokens)
+        .unwrap_or(0);
+
     // Deterministic context assembly (ADR-018): resolve overflow *before*
     // the provider call — drop-oldest, then fold the dropped turns into the
     // rolling summary with one bounded LLM sub-call. A failing summary
     // degrades to a deterministic excerpt, never to a lost turn.
-    let (window, dropped) = context::split_window(policy, summary.as_deref(), &history);
+    let (window, dropped) =
+        context::split_window(policy, summary.as_deref(), memory_tokens, &history);
     let summary = if dropped.is_empty() {
         summary
     } else {
@@ -793,6 +810,7 @@ async fn run_turn(task: TurnTask) {
         reasoning_effort,
         window,
         summary,
+        memory,
         emitter,
         partial: Arc::clone(&partial),
         reasoning: Arc::clone(&reasoning),
@@ -1381,7 +1399,7 @@ mod tests {
         let second_window = vec![ChatMessage::user("again")];
         let second_request = ChatRequest::new(
             model,
-            crate::context::assemble(None, Some("compact summary"), &second_window),
+            crate::context::assemble(None, None, Some("compact summary"), &second_window),
         );
 
         let cassette = Cassette {
@@ -2073,5 +2091,51 @@ mod tests {
         assert_eq!(history[0], ChatMessage::user("hello"));
         assert_eq!(history[1], ChatMessage::assistant("two"));
         assert_eq!(client.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_is_injected_into_the_next_turn_within_budget() {
+        let dir = temp_dir("memory-inject");
+        let store = MemoryStore::new(dir.join("memory"));
+        store
+            .write("The user's pet frog is named Kaeru", &["pets".into()])
+            .unwrap();
+
+        let client = ScriptedClient::new(vec![vec![
+            CoreEvent::Delta { text: "ok".into() },
+            CoreEvent::TurnDone { usage: None },
+        ]]);
+        let core = Arc::new(
+            AgentCore::with_mode(
+                crate::config::Config::default(),
+                client.clone(),
+                ClientMode::Live,
+            )
+            .with_memory(store.clone()),
+        );
+        let session = ChatSession::new(core, "test");
+        let handle = session.send("what is my frog called?").unwrap();
+        drain(handle.into_events()).await;
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 1);
+        let messages = &requests[0].messages;
+        // The memory block is a system message before the user turn.
+        let memory_index = messages
+            .iter()
+            .position(|m| m.content.contains("pet frog is named Kaeru"))
+            .expect("the durable note was injected");
+        let user_index = messages
+            .iter()
+            .position(|m| m.content.contains("what is my frog called?"))
+            .unwrap();
+        assert!(memory_index < user_index);
+        assert!(messages[memory_index].content.contains("(pets)"));
+        // The block is bounded, so it can never crowd out the window.
+        assert!(
+            messages[memory_index].content.chars().count()
+                <= (crate::memory::MEMORY_BLOCK_BUDGET_TOKENS as usize) * 4
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

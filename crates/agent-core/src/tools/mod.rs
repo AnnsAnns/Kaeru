@@ -1,6 +1,7 @@
-//! The tool seam: a self-describing [`Tool`] trait, a registry, and the M3
-//! tools (`web_search`, consent-gated `memory_write`). Every tool declares its
-//! [`Risk`]; risky tools route through the consent flow (ADR-014).
+//! The tool seam: a self-describing [`Tool`] trait, a registry, and the tools
+//! (`web_search`, consent-gated `memory_write`, read-only `memory_search`).
+//! Every tool declares its [`Risk`]; risky tools route through the consent flow
+//! (ADR-014).
 
 pub mod memory;
 pub mod web_search;
@@ -18,7 +19,8 @@ use crate::events::Risk;
 use crate::llm::LlmClient;
 use crate::search::SearchProvider;
 
-pub use memory::{MemoryStore, MemoryWriteTool};
+pub use crate::memory::MemoryStore;
+pub use memory::{MemorySearchTool, MemoryWriteTool};
 pub use web_search::WebSearchTool;
 
 /// A tool execution future.
@@ -95,13 +97,14 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    /// The M3 default set: `web_search` (always) and `memory_write` (only when
-    /// a memory store is configured).
+    /// The default set: `web_search` (always) plus `memory_write` and
+    /// `memory_search` (only when a memory store is configured).
     pub fn with_defaults(max_search_results: usize, memory: Option<MemoryStore>) -> Self {
         let mut registry = Self::new();
         registry.register(WebSearchTool::new(max_search_results));
         if let Some(store) = memory {
-            registry.register(MemoryWriteTool::new(store));
+            registry.register(MemoryWriteTool::new(store.clone()));
+            registry.register(MemorySearchTool::new(store));
         }
         registry
     }

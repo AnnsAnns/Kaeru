@@ -17,6 +17,7 @@
       <h1 class="app-name">Kaeru 🐸</h1>
       <div class="header-controls">
         <button id="threads-btn" class="chip" type="button" title="Toggle threads" aria-expanded="false">🧵 Threads</button>
+        <button id="memory-btn" class="chip" type="button" title="Toggle memory" aria-expanded="false">🗒️ Memory</button>
         <button id="theme-btn" class="chip" type="button" title="Cycle theme">
           <span aria-hidden="true">🎨 Theme:</span> <br /> <span id="theme-name">latenightbath</span>
         </button>
@@ -44,6 +45,20 @@
       </aside>
 
       <main id="messages" aria-live="polite" aria-label="Chat"></main>
+
+      <aside id="memory-panel" class="box memory-panel" aria-label="Memory">
+        <div class="box-title">
+          <span class="title-label">Memory</span>
+          <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
+        </div>
+        <form id="memory-search" class="memory-search">
+          <input id="memory-query" type="search" placeholder="search memory…"
+            autocomplete="off" spellcheck="false" aria-label="Search memory">
+          <button type="submit" class="action-btn">find</button>
+        </form>
+        <p id="memory-empty" class="memory-empty" hidden>no notes yet — ask kaeru to remember something</p>
+        <ul id="memory-list" class="memory-list"></ul>
+      </aside>
     </div>
 
     <footer class="box composer-box">

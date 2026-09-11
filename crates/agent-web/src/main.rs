@@ -17,7 +17,7 @@ mod routes;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_core::{AgentCore, ChatSession, ClientMode, Config, ConversationStore, Paths};
+use agent_core::{AgentCore, ClientMode, Config, ConversationRegistry, ConversationStore, Paths};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
@@ -126,11 +126,12 @@ fn main() {
         }
     };
 
-    // M2: one persisted conversation ("default"); more conversations and a
-    // picker UI arrive with a later milestone. Reload restores it (§6.6).
+    // M2.5: threads are owned by a core registry over the plain-file store.
+    // Nothing is created up front — the UI lists existing threads and creates
+    // its first one on demand (reload falls back to newest/fresh, §6.6).
     let store = ConversationStore::new(cli.paths.conversations.clone());
-    let session = Arc::new(ChatSession::with_store(Arc::clone(&core), "default", store));
-    let state = AppState::new(core, session);
+    let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store));
+    let state = AppState::new(core, registry);
 
     banner(&cli, &config, &state);
 

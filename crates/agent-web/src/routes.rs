@@ -1,12 +1,17 @@
-//! HTTP surface: `/api/models`, `/api/chat` (SSE), `/api/abort`, `/api/session`,
-//! plus embedded static assets. Static assets are public and cacheable;
-//! every `/api/*` route goes through the `X-Auth-Token` check when a token is
-//! configured, and API responses are never cacheable.
+//! HTTP surface: `/api/threads*`, `/api/chat` (SSE), `/api/abort`,
+//! `/api/models`, and the `/api/session` compatibility alias, plus embedded
+//! static assets. Static assets are public and cacheable; every `/api/*`
+//! route goes through the `X-Auth-Token` check when a token is configured,
+//! and API responses are never cacheable.
+//!
+//! M2.5: the UI calls conversations *threads*. The [`ConversationRegistry`]
+//! owns one live `ChatSession` per thread; `/api/chat` and `/api/abort` take
+//! an optional `thread` id (absent = the newest thread, created on demand).
 
 use std::sync::Arc;
 
-use agent_core::{AgentCore, ChatSession};
-use axum::extract::{Request, State};
+use agent_core::{AgentCore, ChatSession, ConversationRegistry};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -20,15 +25,16 @@ use crate::{assets, bridge, error};
 #[derive(Clone)]
 pub struct AppState {
     pub core: Arc<AgentCore>,
-    pub session: Arc<ChatSession>,
+    pub registry: Arc<ConversationRegistry>,
 }
 
 impl AppState {
-    pub fn new(core: Arc<AgentCore>, session: Arc<ChatSession>) -> Self {
-        Self { core, session }
+    pub fn new(core: Arc<AgentCore>, registry: Arc<ConversationRegistry>) -> Self {
+        Self { core, registry }
     }
 
-    /// Test helper: a state with the builtin fake provider.
+    /// Test helper: a state on the builtin fake provider, backed by a fresh
+    /// throwaway conversations directory.
     #[cfg(test)]
     pub fn fake() -> Self {
         let core = Arc::new(AgentCore::with_mode(
@@ -38,8 +44,23 @@ impl AppState {
                 cassette: std::path::PathBuf::new(),
             },
         ));
-        let session = Arc::new(ChatSession::new(Arc::clone(&core), "test"));
-        Self { core, session }
+        Self::with_core(core)
+    }
+
+    #[cfg(test)]
+    pub fn with_core(core: Arc<AgentCore>) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kaeru-web-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let registry = Arc::new(ConversationRegistry::new(
+            Arc::clone(&core),
+            agent_core::ConversationStore::new(dir),
+        ));
+        Self { core, registry }
     }
 }
 
@@ -49,6 +70,8 @@ pub fn router(state: AppState) -> Router {
         .route("/models", get(get_models))
         .route("/chat", post(post_chat))
         .route("/abort", post(post_abort))
+        .route("/threads", get(list_threads).post(create_thread))
+        .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -87,13 +110,95 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
     next.run(request).await
 }
 
+/* ---------- request bodies / queries ---------- */
+
 #[derive(Debug, Deserialize)]
 struct ChatBody {
     message: String,
     /// Optional per-conversation model override (empty string clears it).
     #[serde(default)]
     model: Option<String>,
+    /// Target thread; absent = newest thread (created on demand).
+    #[serde(default)]
+    thread: Option<String>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+struct ThreadQuery {
+    #[serde(default)]
+    thread: Option<String>,
+}
+
+/* ---------- helpers ---------- */
+
+fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
+    let id = session.conversation_id();
+    json!({
+        // `conversation` kept as an M2-compatible alias of `id`.
+        "conversation": id,
+        "id": id,
+        "model": session.current_model(),
+        "active": session.is_active(),
+        "fake": state.core.is_fake(),
+        "title": session.title(),
+        "summary": session.summary(),
+        "history": serde_json::to_value(session.history()).unwrap_or_default(),
+        "usage": serde_json::to_value(session.total_usage()).unwrap_or_default(),
+    })
+}
+
+/// Map a core error to HTTP, honoring an explicit thread lookup: a missing
+/// thread is a plain 404 (a client mistake), unlike the provider-flavored
+/// `NotFound` that becomes a gateway error.
+fn thread_error(err: &agent_core::ApiError) -> Response {
+    if err.kind == agent_core::ApiErrorKind::NotFound {
+        error::json_error(StatusCode::NOT_FOUND, "not_found", err.message.clone())
+    } else {
+        error::api_error(err)
+    }
+}
+
+/// Resolve the session a request targets: the named thread (404 if absent),
+/// else the newest thread, else a fresh one.
+fn resolve_thread(
+    state: &AppState,
+    thread: Option<&str>,
+) -> std::result::Result<Arc<ChatSession>, Box<Response>> {
+    match thread {
+        Some(id) => state
+            .registry
+            .get(id)
+            .map_err(|e| Box::new(thread_error(&e))),
+        None => match state.registry.latest() {
+            Ok(Some(session)) => Ok(session),
+            Ok(None) => state
+                .registry
+                .create(None)
+                .map_err(|e| Box::new(error::api_error(&e))),
+            Err(e) => Err(Box::new(error::api_error(&e))),
+        },
+    }
+}
+
+/// Resolve without ever creating a thread (for abort).
+fn resolve_existing(
+    state: &AppState,
+    thread: Option<&str>,
+) -> std::result::Result<Option<Arc<ChatSession>>, Box<Response>> {
+    match thread {
+        Some(id) => state
+            .registry
+            .get(id)
+            .map(Some)
+            .map_err(|e| Box::new(thread_error(&e))),
+        None => state
+            .registry
+            .latest()
+            .map_err(|e| Box::new(error::api_error(&e))),
+    }
+}
+
+/* ---------- handlers ---------- */
 
 async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Response {
     if body.message.trim().is_empty() {
@@ -103,22 +208,32 @@ async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) ->
             "message must not be empty",
         );
     }
+    let session = match resolve_thread(&state, body.thread.as_deref()) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
     if let Some(model) = body.model.as_deref() {
         let model = model.trim();
-        state
-            .session
-            .set_model((!model.is_empty()).then(|| model.to_owned()));
+        session.set_model((!model.is_empty()).then(|| model.to_owned()));
     }
-    match state.session.send(&body.message) {
+    match session.send(&body.message) {
         // Request-scoped M1 wiring (ADR-015): the SSE response owns the turn.
         Ok(handle) => bridge::sse_response(handle.into_events()),
         Err(err) => error::api_error(&err),
     }
 }
 
-async fn post_abort(State(state): State<AppState>) -> Response {
-    match state.session.abort() {
-        // Idempotent: aborting an idle session is a no-op, not an error.
+async fn post_abort(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+    let session = match resolve_existing(&state, query.thread.as_deref()) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    let result = match session {
+        Some(session) => session.abort(),
+        None => Ok(false),
+    };
+    match result {
+        // Idempotent: aborting an idle/absent thread is a no-op, not an error.
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => error::api_error(&err),
     }
@@ -131,20 +246,44 @@ async fn get_models(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn get_session(State(state): State<AppState>) -> Response {
-    // Full reload/restore payload (§6.6, M2): history + summary + accumulated
-    // usage, so a browser refresh re-renders the conversation.
-    Json(json!({
-        "conversation": state.session.conversation_id(),
-        "model": state.session.current_model(),
-        "active": state.session.is_active(),
-        "fake": state.core.is_fake(),
-        "title": state.session.title(),
-        "summary": state.session.summary(),
-        "history": serde_json::to_value(state.session.history()).unwrap_or_default(),
-        "usage": serde_json::to_value(state.session.total_usage()).unwrap_or_default(),
-    }))
-    .into_response()
+async fn get_session(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+    // M2 compatibility alias: reload/restore payload for one thread.
+    match resolve_thread(&state, query.thread.as_deref()) {
+        Ok(session) => Json(thread_payload(&state, &session)).into_response(),
+        Err(response) => *response,
+    }
+}
+
+async fn list_threads(State(state): State<AppState>) -> Response {
+    match state.registry.list() {
+        Ok(threads) => Json(json!({ "threads": threads })).into_response(),
+        Err(err) => error::api_error(&err),
+    }
+}
+
+async fn create_thread(State(state): State<AppState>) -> Response {
+    match state.registry.create(None) {
+        Ok(session) => (
+            StatusCode::CREATED,
+            Json(json!({ "id": session.conversation_id() })),
+        )
+            .into_response(),
+        Err(err) => error::api_error(&err),
+    }
+}
+
+async fn get_thread(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.registry.get(&id) {
+        Ok(session) => Json(thread_payload(&state, &session)).into_response(),
+        Err(err) => thread_error(&err),
+    }
+}
+
+async fn delete_thread(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.registry.delete(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => thread_error(&err),
+    }
 }
 
 #[cfg(test)]
@@ -162,8 +301,7 @@ mod tests {
             None => Config::default(),
         };
         let core = Arc::new(AgentCore::new(config, Arc::new(FakeProvider::builtin())));
-        let session = Arc::new(ChatSession::new(Arc::clone(&core), "test"));
-        AppState { core, session }
+        AppState::with_core(core)
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -213,29 +351,44 @@ mod tests {
         (parts.status, json, parts.headers)
     }
 
+    /// POST /api/chat and drain the SSE body to completion.
+    async fn chat(state: &AppState, body: serde_json::Value) -> axum::response::Response {
+        let response = request(
+            state,
+            axum::http::Method::POST,
+            "/api/chat",
+            Some(&body),
+            HeaderMap::new(),
+        )
+        .await;
+        let status = response.status();
+        if status.is_success() {
+            let _ = response.into_body().collect().await;
+        }
+        // Rebuild a response is unnecessary; callers mostly want the status.
+        axum::http::Response::builder()
+            .status(status)
+            .body(Body::empty())
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn session_endpoint_reports_fake_state() {
+    async fn session_endpoint_reports_fake_state_and_auto_creates_a_thread() {
         let state = AppState::fake();
         let (status, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["conversation"], "test");
         assert_eq!(json["fake"], true);
         assert_eq!(json["model"], agent_core::DEFAULT_MODEL);
+        assert!(json["id"].as_str().is_some());
+        // Auto-creation persisted an empty thread.
+        assert_eq!(state.registry.list().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn session_endpoint_restores_history_after_a_reload() {
         let state = AppState::fake();
-        let response = request(
-            &state,
-            axum::http::Method::POST,
-            "/api/chat",
-            Some(&json!({ "message": "hello" })),
-            HeaderMap::new(),
-        )
-        .await;
+        let response = chat(&state, json!({ "message": "hello" })).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let _ = response.into_body().collect().await;
 
         let (status, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
         assert_eq!(status, StatusCode::OK);
@@ -324,7 +477,8 @@ mod tests {
             "missing terminal frame: {text}"
         );
         // History must now hold the exchange.
-        assert_eq!(state.session.history().len(), 2);
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(json["history"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -339,6 +493,8 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Rejected before any thread is created.
+        assert!(state.registry.list().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -347,8 +503,7 @@ mod tests {
             Config::default(),
             Arc::new(FakeProvider::builtin().with_delay(std::time::Duration::from_secs(30))),
         ));
-        let session = Arc::new(ChatSession::new(Arc::clone(&core), "test"));
-        let slow = AppState { core, session };
+        let slow = AppState::with_core(core);
 
         let first = request(
             &slow,
@@ -368,7 +523,16 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        slow.session.abort().unwrap();
+        // Abort through the API to release the slow turn.
+        let abort = request(
+            &slow,
+            axum::http::Method::POST,
+            "/api/abort",
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(abort.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -383,35 +547,95 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        // Aborting with no threads must not create one.
+        assert!(state.registry.list().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn model_override_is_applied_and_clearable() {
         let state = AppState::fake();
-        let response = request(
+        chat(&state, json!({ "message": "hi", "model": "custom/m" })).await;
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(json["model"], "custom/m");
+
+        chat(&state, json!({ "message": "again", "model": "" })).await;
+        let (_, json, _) = get_json(&state, "/api/session", HeaderMap::new()).await;
+        assert_eq!(json["model"], agent_core::DEFAULT_MODEL);
+    }
+
+    #[tokio::test]
+    async fn threads_can_be_created_listed_fetched_and_deleted() {
+        let state = AppState::fake();
+
+        let created = request(
             &state,
             axum::http::Method::POST,
-            "/api/chat",
-            Some(&json!({ "message": "hi", "model": "custom/m" })),
+            "/api/threads",
+            None,
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        // Drain the SSE body: it only ends when the turn completed, which
-        // makes the follow-up send deterministic (no busy race).
-        let _ = response.into_body().collect().await;
-        assert_eq!(state.session.current_model(), "custom/m");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let (_, body) = created.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = json["id"].as_str().unwrap().to_owned();
+
+        let (status, json, _) = get_json(&state, "/api/threads", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        let threads = json["threads"].as_array().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0]["id"], id);
+        assert_eq!(threads[0]["messageCount"], 0);
+
+        let (status, json, _) =
+            get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["id"], id);
+
+        let deleted = request(
+            &state,
+            axum::http::Method::DELETE,
+            &format!("/api/threads/{id}"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let (status, _, _) =
+            get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn unknown_thread_ids_are_404() {
+        let state = AppState::fake();
+        let (status, _, _) = get_json(&state, "/api/threads/nope", HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
         let response = request(
             &state,
             axum::http::Method::POST,
             "/api/chat",
-            Some(&json!({ "message": "again", "model": "" })),
+            Some(&json!({ "message": "hi", "thread": "nope" })),
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = response.into_body().collect().await;
-        assert_eq!(state.session.current_model(), agent_core::DEFAULT_MODEL);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chat_targets_an_explicit_thread_and_keeps_histories_separate() {
+        let state = AppState::fake();
+        let a = state.registry.create(None).unwrap().conversation_id();
+        // A second, unrelated thread that must stay empty.
+        let b = state.registry.create(None).unwrap().conversation_id();
+
+        chat(&state, json!({ "message": "hello a", "thread": a })).await;
+
+        let (_, json, _) = get_json(&state, &format!("/api/threads/{a}"), HeaderMap::new()).await;
+        assert_eq!(json["history"].as_array().unwrap().len(), 2);
+        let (_, json, _) = get_json(&state, &format!("/api/threads/{b}"), HeaderMap::new()).await;
+        assert_eq!(json["history"].as_array().unwrap().len(), 0);
     }
 }

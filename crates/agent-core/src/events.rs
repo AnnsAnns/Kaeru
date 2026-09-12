@@ -195,6 +195,37 @@ impl CoreEvent {
     }
 }
 
+/// A workspace file attached to a message (M5): an upload the user sent or an
+/// artifact a tool produced. Display-only; the model never receives it as a
+/// provider field (attachments are named in the message text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// Workspace-relative path with `/` separators.
+    pub path: String,
+    /// MIME hint from the extension, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_hint: Option<String>,
+}
+
+impl Artifact {
+    pub fn new(path: impl Into<String>, mime_hint: Option<&str>) -> Self {
+        Self {
+            path: path.into(),
+            mime_hint: mime_hint.map(str::to_owned),
+        }
+    }
+}
+
+impl CoreEvent {
+    /// The event form of an [`Artifact`].
+    pub fn artifact(artifact: &Artifact) -> Self {
+        Self::Artifact {
+            path: artifact.path.clone(),
+            mime_hint: artifact.mime_hint.clone(),
+        }
+    }
+}
+
 /// What a consent card asks for (ADR-014). Extends as tools arrive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

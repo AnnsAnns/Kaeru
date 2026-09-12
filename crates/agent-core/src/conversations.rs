@@ -12,14 +12,42 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiErrorKind, Result};
-use crate::events::Usage;
+use crate::events::{Artifact, Usage};
 use crate::llm::{ChatMessage, Role, ToolCall};
 
 /// The conversation file version this build reads and writes.
 ///
 /// v2 (M2.5) adds `updatedAt`; v1 files are migrated on load by copying
-/// `createdAt` into `updatedAt`.
-pub const CONVERSATION_SCHEMA_VERSION: u32 = 2;
+/// `createdAt` into `updatedAt`. v3 (M5) adds `artifacts` on messages —
+/// workspace files attached to a user upload or an assistant answer.
+pub const CONVERSATION_SCHEMA_VERSION: u32 = 3;
+
+/// A workspace file reference as persisted (M5): `mimeHint` follows the
+/// camelCase file convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredArtifact {
+    pub path: String,
+    #[serde(rename = "mimeHint", default, skip_serializing_if = "Option::is_none")]
+    pub mime_hint: Option<String>,
+}
+
+impl From<&Artifact> for StoredArtifact {
+    fn from(artifact: &Artifact) -> Self {
+        Self {
+            path: artifact.path.clone(),
+            mime_hint: artifact.mime_hint.clone(),
+        }
+    }
+}
+
+impl StoredArtifact {
+    pub fn to_artifact(&self) -> Artifact {
+        Artifact {
+            path: self.path.clone(),
+            mime_hint: self.mime_hint.clone(),
+        }
+    }
+}
 
 /// One stored message. Mirrors [`ChatMessage`]; the agent-loop fields
 /// (`toolCallId`, `toolCalls`) arrive with M3 and are optional/backward
@@ -40,6 +68,10 @@ pub struct StoredMessage {
     /// Model thinking for this turn (display-only); absent on older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Workspace files attached to this message (M5): uploads on user
+    /// messages, artifacts on the assistant answer; absent on older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<StoredArtifact>,
 }
 
 impl From<&ChatMessage> for StoredMessage {
@@ -50,6 +82,7 @@ impl From<&ChatMessage> for StoredMessage {
             tool_call_id: message.tool_call_id.clone(),
             tool_calls: message.tool_calls.clone(),
             reasoning: message.reasoning.clone(),
+            artifacts: message.artifacts.iter().map(StoredArtifact::from).collect(),
         }
     }
 }
@@ -60,6 +93,11 @@ impl StoredMessage {
         message.reasoning = self.reasoning.clone();
         message.tool_call_id = self.tool_call_id.clone();
         message.tool_calls = self.tool_calls.clone();
+        message.artifacts = self
+            .artifacts
+            .iter()
+            .map(StoredArtifact::to_artifact)
+            .collect();
         message
     }
 }
@@ -278,6 +316,9 @@ fn migrate(text: &str) -> Result<Conversation> {
     if schema < 2 {
         migrate_v1_to_v2(&mut value);
     }
+    if schema < 3 {
+        migrate_v2_to_v3(&mut value);
+    }
     serde_json::from_value(value).map_err(|e| {
         ApiError::new(
             ApiErrorKind::Internal,
@@ -303,6 +344,15 @@ fn migrate_v1_to_v2(value: &mut serde_json::Value) {
         object.insert("updatedAt".into(), created_at);
     }
     object.insert("schema".into(), serde_json::json!(2));
+}
+
+/// v2 → v3: the schema marker only. v3 adds optional per-message `artifacts`;
+/// absent means empty, so no message data is rewritten.
+fn migrate_v2_to_v3(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert("schema".into(), serde_json::json!(3));
 }
 
 /// Conversation ids become file names: keep them to plain `[A-Za-z0-9_-]`
@@ -409,7 +459,7 @@ mod tests {
         store.save(&sample("default")).unwrap();
         let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["schema"], 2);
+        assert_eq!(json["schema"], 3);
         assert_eq!(json["id"], "default");
         assert_eq!(json["createdAt"], "2001-09-09T01:46:40Z");
         assert!(
@@ -424,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v1_file_migrates_to_v2_with_no_data_loss() {
+    fn a_v1_file_migrates_to_v3_with_no_data_loss() {
         let (store, dir) = temp_store("migrate-v1");
         // A v1 file: schema 1, no `updatedAt` field at all.
         let v1 = serde_json::json!({
@@ -446,14 +496,77 @@ mod tests {
         .unwrap();
 
         let loaded = store.load("default").unwrap().unwrap();
-        assert_eq!(loaded.schema, 2);
+        assert_eq!(loaded.schema, 3);
         assert_eq!(loaded.updated_at, "2001-09-09T01:46:40Z");
         assert_eq!(loaded.created_at, "2001-09-09T01:46:40Z");
         assert_eq!(loaded.title.as_deref(), Some("old thread"));
         assert_eq!(loaded.messages.len(), 2);
+        assert!(loaded.messages[0].artifacts.is_empty());
         assert_eq!(loaded.usage.input_tokens, Some(10));
         // Not quarantined: the file stays in place.
         assert!(dir.join("default.json").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artifacts_round_trip_with_camel_case_mime_hints() {
+        let (store, dir) = temp_store("artifacts");
+        let mut conversation = sample("default");
+        conversation.messages[0] = StoredMessage::from(
+            &ChatMessage::user("look at this")
+                .with_artifacts(vec![Artifact::new("photo.png", Some("image/png"))]),
+        );
+        conversation.messages[1] = StoredMessage::from(
+            &ChatMessage::assistant("done")
+                .with_artifacts(vec![Artifact::new("rotated.png", None)]),
+        );
+        store.save(&conversation).unwrap();
+
+        let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["messages"][0]["artifacts"][0]["path"], "photo.png");
+        assert_eq!(json["messages"][0]["artifacts"][0]["mimeHint"], "image/png");
+        assert!(
+            json["messages"][1]["artifacts"][0]
+                .get("mimeHint")
+                .is_none()
+        );
+
+        let loaded = store.load("default").unwrap().unwrap();
+        assert_eq!(
+            loaded.messages[0].to_chat().artifacts,
+            vec![Artifact::new("photo.png", Some("image/png"))]
+        );
+        assert_eq!(
+            loaded.messages[1].to_chat().artifacts,
+            vec![Artifact::new("rotated.png", None)]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_v2_file_loads_as_v3_with_empty_artifacts() {
+        let (store, dir) = temp_store("migrate-v2");
+        let mut v2 = serde_json::to_value(sample("default")).unwrap();
+        v2["schema"] = serde_json::json!(2);
+        // v2 files have no artifacts field anywhere.
+        v2["messages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|m| {
+                m.as_object_mut().unwrap().remove("artifacts");
+            });
+        std::fs::write(
+            dir.join("default.json"),
+            serde_json::to_string_pretty(&v2).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.load("default").unwrap().unwrap();
+        assert_eq!(loaded.schema, 3);
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(loaded.messages.iter().all(|m| m.artifacts.is_empty()));
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -30,7 +30,7 @@ use crate::conversations::{
 };
 use crate::error::{ApiError, ApiErrorKind, Result};
 use crate::events::{
-    ApprovalFuture, ApprovalKind, ApprovalSink, CoreEvent, Decision, EventStream, Usage,
+    ApprovalFuture, ApprovalKind, ApprovalSink, Artifact, CoreEvent, Decision, EventStream, Usage,
 };
 use crate::llm::ChatMessage;
 
@@ -84,6 +84,9 @@ struct ActiveTurn {
     cancelled: Arc<AtomicBool>,
     /// Consent seam for tools that need approval (M3).
     approvals: Arc<SessionApprovals>,
+    /// Workspace files the turn's tools produced (M5); flushed onto the
+    /// final answer (or the aborted partial) so a reload can render them.
+    artifacts: Arc<Mutex<Vec<Artifact>>>,
 }
 
 /// Core-owned consent resolution for one frontend (ADR-014): emits
@@ -299,9 +302,23 @@ impl ChatSession {
 
     /// Send a user message and start a turn.
     ///
+    /// Send a user message and start a turn.
+    ///
     /// Returns immediately with a handle to the running turn. Fails with
     /// `Busy` while another turn is active, and `Config` on empty input.
     pub fn send(&self, message: &str) -> Result<TurnHandle> {
+        self.send_with_attachments(message, Vec::new())
+    }
+
+    /// Like [`ChatSession::send`], with workspace files attached to the user
+    /// message (M5 uploads). The paths should already be validated against the
+    /// workspace; they are stored for the UI only (the model sees them through
+    /// the message text).
+    pub fn send_with_attachments(
+        &self,
+        message: &str,
+        attachments: Vec<Artifact>,
+    ) -> Result<TurnHandle> {
         if message.trim().is_empty() {
             return Err(ApiError::config("message must not be empty"));
         }
@@ -324,7 +341,9 @@ impl ChatSession {
                 .reasoning_effort()
                 .map(str::to_owned)
         });
-        inner.history.push(ChatMessage::user(message));
+        inner
+            .history
+            .push(ChatMessage::user(message).with_artifacts(attachments));
         if inner.title.is_none() {
             inner.title = Some(derive_title(message));
         }
@@ -345,6 +364,7 @@ impl ChatSession {
         let reasoning = Arc::new(Mutex::new(String::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let approvals = Arc::new(SessionApprovals::new(emitter.clone(), APPROVAL_TIMEOUT));
+        let artifacts = Arc::new(Mutex::new(Vec::new()));
         let join = tokio::spawn(run_turn(TurnTask {
             core: Arc::clone(&self.core),
             session: Arc::clone(&self.inner),
@@ -359,6 +379,7 @@ impl ChatSession {
             reasoning: Arc::clone(&reasoning),
             cancelled: Arc::clone(&cancelled),
             approvals: Arc::clone(&approvals),
+            artifacts: Arc::clone(&artifacts),
         }));
         inner.active = Some(ActiveTurn {
             turn_id,
@@ -369,6 +390,7 @@ impl ChatSession {
             reasoning,
             cancelled,
             approvals,
+            artifacts,
         });
         Ok(TurnHandle {
             turn_id,
@@ -448,13 +470,15 @@ impl ChatSession {
         if last_user + 1 >= inner.history.len() {
             return Err(ApiError::config("nothing to regenerate"));
         }
-        // Drop everything after the last user message and replay it.
+        // Drop everything after the last user message and replay it,
+        // attachments included.
         let message = inner.history[last_user].content.clone();
+        let attachments = inner.history[last_user].artifacts.clone();
         inner.history.truncate(last_user);
         // Re-dispatch through the same path as a fresh send (which appends the
         // user message and starts the turn).
         drop(inner);
-        self.send(&message)
+        self.send_with_attachments(&message, attachments)
     }
 
     fn lock(&self) -> MutexGuard<'_, SessionInner> {
@@ -717,7 +741,13 @@ fn abort_turn(inner: &Arc<Mutex<SessionInner>>, only: Option<u64>) -> Result<boo
         .expect("reasoning lock poisoned")
         .clone();
     if !partial.is_empty() {
-        inner.history.push(assistant_message(partial, reasoning));
+        let mut message = assistant_message(partial, reasoning);
+        message.artifacts = active
+            .artifacts
+            .lock()
+            .expect("artifacts lock poisoned")
+            .clone();
+        inner.history.push(message);
     }
     let _ = active
         .events
@@ -740,6 +770,7 @@ struct TurnTask {
     reasoning: Arc<Mutex<String>>,
     cancelled: Arc<AtomicBool>,
     approvals: Arc<SessionApprovals>,
+    artifacts: Arc<Mutex<Vec<Artifact>>>,
 }
 
 async fn run_turn(task: TurnTask) {
@@ -757,6 +788,7 @@ async fn run_turn(task: TurnTask) {
         reasoning,
         cancelled,
         approvals,
+        artifacts,
     } = task;
 
     // Persona (M4.5, ADR-027): the owner-written character is read fresh at
@@ -839,17 +871,33 @@ async fn run_turn(task: TurnTask) {
         approvals,
         turn_id,
         max_steps: core.config().agent.max_steps,
+        artifacts: Arc::clone(&artifacts),
     })
     .await;
 
     if cancelled.load(Ordering::SeqCst) {
         return; // aborted from outside; abort_turn already flushed
     }
-    finalize_turn(&session, turn_id, &partial, &reasoning, result);
+    finalize_turn(&session, turn_id, &partial, &reasoning, &artifacts, result);
 }
 
 /// Build the assistant message for a finished turn, attaching the model's
 /// thinking (when any) so the UI can show it again after a reload.
+/// Attach a turn's artifacts (M5) to its final plain answer; intermediate
+/// assistant messages carry tool calls, never artifacts.
+fn attach_artifacts(messages: &mut [ChatMessage], artifacts: Vec<Artifact>) {
+    if artifacts.is_empty() {
+        return;
+    }
+    if let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == crate::llm::Role::Assistant && message.tool_calls.is_none())
+    {
+        message.artifacts = artifacts;
+    }
+}
+
 fn assistant_message(content: String, reasoning: String) -> ChatMessage {
     let message = ChatMessage::assistant(content);
     if reasoning.is_empty() {
@@ -864,6 +912,7 @@ fn finalize_turn(
     turn_id: u64,
     partial: &Arc<Mutex<String>>,
     reasoning: &Arc<Mutex<String>>,
+    artifacts: &Arc<Mutex<Vec<Artifact>>>,
     result: LoopResult,
 ) {
     let mut inner = session.lock().expect("session lock poisoned");
@@ -876,16 +925,24 @@ fn finalize_turn(
         inner.accumulated_usage.add(&usage);
     }
 
+    // A turn's artifacts (M5) belong to its final plain answer, so a reload
+    // renders them next to the reply that produced them.
+    let collected: Vec<Artifact> = artifacts.lock().expect("artifacts lock poisoned").clone();
+    let mut produced = result.new_messages;
+    attach_artifacts(&mut produced, collected.clone());
+
     // The loop's messages are already complete and ordered; commit them.
-    let committed = result.new_messages.len();
-    inner.history.extend(result.new_messages);
+    let committed = produced.len();
+    inner.history.extend(produced);
 
     if committed == 0 {
         let partial = partial.lock().expect("partial lock poisoned").clone();
         if !partial.is_empty() {
             // Failed after streaming text (no final message): keep what showed.
             let reasoning = reasoning.lock().expect("reasoning lock poisoned").clone();
-            inner.history.push(assistant_message(partial, reasoning));
+            let mut message = assistant_message(partial, reasoning);
+            message.artifacts = collected;
+            inner.history.push(message);
         } else if result.outcome == crate::agent::TurnOutcome::Failed {
             // The model produced nothing before failing: drop the trailing user
             // message so a retry resends cleanly instead of duplicating it.
@@ -1585,15 +1642,132 @@ mod tests {
         assert_eq!(session.total_usage().input_tokens, Some(4));
         assert_eq!(session.total_usage().output_tokens, Some(6));
 
-        // The file on disk carries the planned schema (Appendix C: schema: 2,
-        // M2.5 added `updatedAt`).
+        // The file on disk carries the planned schema (Appendix C: M2.5 added
+        // `updatedAt` in v2, M5 added message `artifacts` in v3).
         let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["schema"], 2);
+        assert_eq!(json["schema"], 3);
         assert!(json["updatedAt"].is_string());
         assert_eq!(json["messages"].as_array().unwrap().len(), 2);
         assert_eq!(json["usage"]["total_tokens"], 10);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn attachments_and_artifacts_persist_with_their_messages() {
+        let dir = std::env::temp_dir().join(format!("kaeru-test-{}-files", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ConversationStore::new(&dir);
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut registry = ToolRegistry::new();
+        registry.register(StubTool {
+            name: "echo",
+            risk: Risk::Safe,
+            output: "OK".into(),
+            seen: Arc::clone(&seen),
+            artifact: Some("rotated.png".into()),
+        });
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "echo".into(),
+                    input: json!({}),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta {
+                    text: "rotated it".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let session = ChatSession::with_store(
+            core_scripted(client, registry, AuditLog::disabled()),
+            "default",
+            store.clone(),
+        );
+        let handle = session
+            .send_with_attachments(
+                "rotate this",
+                vec![Artifact::new("photo.png", Some("image/png"))],
+            )
+            .unwrap();
+        let events = drain(handle.into_events()).await;
+        assert!(events.iter().any(
+            |event| matches!(event, CoreEvent::Artifact { path, .. } if path == "rotated.png")
+        ));
+
+        // The upload rides on the user message; the tool output lands on the
+        // final answer (the intermediate message only carries the tool call).
+        let history = session.history();
+        assert_eq!(
+            history[0].artifacts,
+            vec![Artifact::new("photo.png", Some("image/png"))]
+        );
+        assert_eq!(
+            history.last().unwrap().artifacts,
+            vec![Artifact::new("rotated.png", Some("image/png"))]
+        );
+        assert!(
+            history[1].artifacts.is_empty(),
+            "tool-call turn: no artifacts"
+        );
+
+        // Reload from disk: both survive, schema v3.
+        let reloaded = ChatSession::with_store(
+            core_scripted(
+                ScriptedClient::new(Vec::new()),
+                ToolRegistry::new(),
+                AuditLog::disabled(),
+            ),
+            "default",
+            store,
+        );
+        let history = reloaded.history();
+        assert_eq!(history[0].artifacts[0].path, "photo.png");
+        assert_eq!(history.last().unwrap().artifacts[0].path, "rotated.png");
+        let text = std::fs::read_to_string(dir.join("default.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["schema"], 3);
+        assert_eq!(json["messages"][0]["artifacts"][0]["path"], "photo.png");
+        assert_eq!(json["messages"][0]["artifacts"][0]["mimeHint"], "image/png");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn regenerate_resends_the_original_attachments() {
+        let client = ScriptedClient::new(vec![
+            vec![
+                CoreEvent::Delta {
+                    text: "first".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+            vec![
+                CoreEvent::Delta {
+                    text: "second".into(),
+                },
+                CoreEvent::TurnDone { usage: None },
+            ],
+        ]);
+        let core = core_scripted(client, ToolRegistry::new(), AuditLog::disabled());
+        let session = ChatSession::new(core, "test");
+        drain(
+            session
+                .send_with_attachments("look", vec![Artifact::new("photo.png", None)])
+                .unwrap()
+                .into_events(),
+        )
+        .await;
+        drain(session.regenerate().unwrap().into_events()).await;
+        let history = session.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].artifacts[0].path, "photo.png");
+        assert_eq!(history[1].content, "second");
     }
 
     #[tokio::test]
@@ -1778,12 +1952,14 @@ mod tests {
         }
     }
 
-    /// A tool that records its inputs and returns a fixed output.
+    /// A tool that records its inputs and returns a fixed output; optionally
+    /// emits one artifact (M5 persistence tests).
     struct StubTool {
         name: &'static str,
         risk: Risk,
         output: String,
         seen: Arc<StdMutex<Vec<Value>>>,
+        artifact: Option<String>,
     }
 
     impl Tool for StubTool {
@@ -1799,10 +1975,16 @@ mod tests {
         fn risk(&self, _input: &Value) -> Risk {
             self.risk.clone()
         }
-        fn execute(&self, input: Value, _ctx: ToolContext) -> ToolFuture {
+        fn execute(&self, input: Value, ctx: ToolContext) -> ToolFuture {
             self.seen.lock().unwrap().push(input);
             let output = self.output.clone();
-            Box::pin(async move { Ok(output) })
+            let artifact = self.artifact.clone();
+            Box::pin(async move {
+                if let (Some(path), Some(sink)) = (artifact, ctx.artifacts) {
+                    sink.emit(&path, Some("image/png"));
+                }
+                Ok(output)
+            })
         }
     }
 
@@ -1834,6 +2016,7 @@ mod tests {
             risk: Risk::Safe,
             output: "TOOL-OUTPUT".into(),
             seen: Arc::clone(&seen),
+            artifact: None,
         });
         let client = ScriptedClient::new(vec![
             vec![

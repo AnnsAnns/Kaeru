@@ -34,6 +34,38 @@ print(f"cleaned {len(rows)} rows; total={total}")
 `;
 
 function toolCallChunks() {
+  if (TOOL === "python-copy") {
+    // A dependency-free "do something with my upload": copy the uploaded
+    // image, so the artifact round-trip (event + reload) is verifiable.
+    const script = 'import shutil\nshutil.copy("photo.png", "photo-copy.png")\nprint("copied")';
+    return [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_mock_1",
+              type: "function",
+              function: { name: "python", arguments: "" },
+            },
+          ],
+        },
+      },
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              function: {
+                arguments: JSON.stringify({ script }),
+              },
+            },
+          ],
+        },
+      },
+      { delta: {}, finish_reason: "tool_calls" },
+    ];
+  }
   if (TOOL === "python-deps") {
     const script = 'import cowsay\nprint(cowsay.get_output_string("cow", "kaeru"))\n';
     return [

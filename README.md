@@ -113,8 +113,12 @@ runs them and feeds the results back until it answers.
   needs an explicit `NetworkAccess` consent. Files the script writes appear in
   the chat as artifacts — images inline, everything downloadable.
 - **Workspace files** (M5): the 📎 button uploads into `data/sandbox/workspace`
-  (the same folder scripts work in), and `GET /api/files/…` serves them
-  authenticated with sanitized paths (no traversal, no symlink escape).
+  (the same folder scripts work in) and shows an inline preview for images.
+  Uploads are attached to your message and artifacts to the reply, so both are
+  **embedded again after a reload**; `GET /api/files/…` serves them
+  authenticated with sanitized paths (no traversal, no symlink escape), images
+  inline and everything else as a download (text/CSV/JSON open in a tab).
+  Stored in the conversation as message `artifacts` (schema v3).
 
 Tool outputs are **fenced as untrusted data** before the model sees them, every
 tool execution and consent decision is appended to `data/audit.jsonl`, and the

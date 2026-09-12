@@ -100,7 +100,8 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
 - **Wire formats differ by layer.** `CoreEvent` uses a snake_case `type` tag
   (`{"type":"delta","text":"…"}`); SSE adds an `event:` name from
   `CoreEvent::event_name()`. Persisted conversation JSON uses **camelCase**
-  (`createdAt`, `updatedAt`, `toolCallId`) with `"schema": 2`. Config TOML uses
+  (`createdAt`, `updatedAt`, `toolCallId`, `artifacts[].mimeHint`) with
+  `"schema": 3`; API payloads stay snake_case (`mime_hint`). Config TOML uses
   `#[serde(deny_unknown_fields)]`, so unknown keys are hard errors.
 - **Abort is `Error { kind: Aborted }`,** not a dedicated variant — the enum is
   doc-fixed. The frontend renders it as "stopped", not an error card.
@@ -164,6 +165,14 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   symlink escape. Only raster images are `inline`; SVG/HTML download as
   attachments with `nosniff`. The UI must fetch with `X-Auth-Token` and use
   blob URLs (an `<img>` tag cannot carry the header).
+- **M5 message files:** workspace files are persisted *on messages*
+  (`ChatMessage.artifacts`, schema v3): `POST /api/chat` takes validated
+  `attachments` (stored on the user message; `send_with_attachments`),
+  tool artifacts are collected per turn and attached to the final assistant
+  answer by `finalize_turn`/`abort_turn`. They are display-only (never a
+  provider field), so the UI can embed uploads and artifacts again after a
+  reload; only images and inert text types open in a tab, HTML/SVG are
+  download-only.
 - **M5 host check:** `Sandbox::check_host` (bwrap/uv + a real probe run) is
   called by `main.rs` before anything binds; missing tools exit 1 with
   instructions. Tests that need bwrap call `check_host` and skip with a note

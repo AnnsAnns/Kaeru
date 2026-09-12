@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::Usage;
+use crate::events::{Artifact, Usage};
 
 /// Chat roles as used by the conversation history (OpenAI lowercase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,11 @@ pub struct ChatMessage {
     /// Which tool call this message answers (tool messages, M3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Workspace files attached to this message (M5): user uploads on a user
+    /// message, tool outputs on the assistant answer. Display-only: never
+    /// sent to the provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
 }
 
 impl ChatMessage {
@@ -62,12 +67,19 @@ impl ChatMessage {
             reasoning: None,
             tool_calls: None,
             tool_call_id: None,
+            artifacts: Vec::new(),
         }
     }
 
     /// Attach model thinking to a message (assistant turns).
     pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
         self.reasoning = Some(reasoning.into());
+        self
+    }
+
+    /// Attach workspace files to a message (M5).
+    pub fn with_artifacts(mut self, artifacts: Vec<Artifact>) -> Self {
+        self.artifacts = artifacts;
         self
     }
 

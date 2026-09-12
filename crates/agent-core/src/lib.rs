@@ -38,12 +38,12 @@ pub use config::{
 };
 pub use context::ContextPolicy;
 pub use conversations::{
-    CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredMessage,
+    CONVERSATION_SCHEMA_VERSION, Conversation, ConversationStore, StoredArtifact, StoredMessage,
 };
 pub use error::{ApiError, ApiErrorKind, Result};
 pub use events::{
-    ApprovalFuture, ApprovalKind, ApprovalSink, CoreEvent, Decision, DenyAll, EventStream, Risk,
-    Usage,
+    ApprovalFuture, ApprovalKind, ApprovalSink, Artifact, CoreEvent, Decision, DenyAll,
+    EventStream, Risk, Usage,
 };
 pub use llm::{
     CASSETTE_VERSION, Cassette, ChatMessage, ChatRequest, ClientMode, FakeProvider, HttpClient,

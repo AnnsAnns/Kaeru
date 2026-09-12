@@ -566,6 +566,11 @@ body {
 .tool-error summary {
   color: var(--error-color);
 }
+/* Tool results render as standalone collapsed cards in the message list. */
+.tool-result {
+  margin: 4px;
+  flex: 0 0 auto;
+}
 .msg.tool {
   min-height: 0;
   align-self: stretch;
@@ -610,6 +615,23 @@ body {
   border: 2px dashed color-mix(in srgb, var(--box-color-standard) 60%, transparent);
   border-radius: 2px;
 }
+.attachment-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+.attachment-name {
+  border: none;
+  background: transparent;
+  color: var(--base-text-color);
+  font: inherit;
+  cursor: pointer;
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .attachment-remove {
   border: none;
   background: transparent;
@@ -622,22 +644,37 @@ body {
 .action-btn.attach {
   min-width: 44px;
 }
+.artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
 .artifact {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 6px;
   font-size: 0.9em;
   border: 2px dashed color-mix(in srgb, var(--box-color-standard) 60%, transparent);
   border-radius: 2px;
   padding: 4px 8px;
+}
+.artifact-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .artifact-name {
   flex: 1;
   word-break: break-all;
   font-family: var(--font-headerf);
 }
-.artifact-download {
+.artifact-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.artifact-action {
   border: none;
   border-radius: 4px;
   background: var(--box-color-standard);
@@ -649,7 +686,6 @@ body {
   cursor: pointer;
 }
 .artifact-image {
-  flex-basis: 100%;
   max-width: 100%;
   border-radius: 4px;
   background: color-mix(in srgb, var(--base-bd-background-color) 60%, transparent);

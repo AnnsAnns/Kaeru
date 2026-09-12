@@ -178,6 +178,9 @@ struct ChatBody {
     /// Target thread; absent = newest thread (created on demand).
     #[serde(default)]
     thread: Option<String>,
+    /// Workspace files uploaded for this message (M5).
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -220,7 +223,8 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
                 "html": html,
                 "reasoning": message.reasoning,
                 "tool_calls": message.tool_calls,
-                "tool_call_id": message.tool_call_id
+                "tool_call_id": message.tool_call_id,
+                "artifacts": message.artifacts
             })
         })
         .collect();
@@ -304,6 +308,10 @@ async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) ->
             "message must not be empty",
         );
     }
+    let attachments = match attachments_for(&state, &body.attachments) {
+        Ok(attachments) => attachments,
+        Err(response) => return *response,
+    };
     let session = match resolve_thread(&state, body.thread.as_deref()) {
         Ok(session) => session,
         Err(response) => return *response,
@@ -316,11 +324,50 @@ async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) ->
         let effort = effort.trim();
         session.set_reasoning_effort((!effort.is_empty()).then(|| effort.to_owned()));
     }
-    match session.send(&body.message) {
+    match session.send_with_attachments(&body.message, attachments) {
         // Request-scoped M1 wiring (ADR-015): the SSE response owns the turn.
         Ok(handle) => bridge::sse_response(handle.into_events()),
         Err(err) => error::api_error(&err),
     }
+}
+
+/// Validate the chat's attachment paths against the workspace (M5): each must
+/// be a single-component upload that exists, so a stored message can never
+/// name something the file routes would refuse to serve.
+///
+/// The error is boxed (like [`resolve_thread`]'s) because `Response` is large
+/// enough to trip clippy's `result_large_err`; only the error path pays.
+fn attachments_for(
+    state: &AppState,
+    paths: &[String],
+) -> std::result::Result<Vec<agent_core::Artifact>, Box<Response>> {
+    let bad = |message: String| {
+        Box::new(error::json_error(
+            StatusCode::BAD_REQUEST,
+            "config",
+            message,
+        ))
+    };
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(files) = state.files.as_ref() else {
+        return Err(bad("attachments need the workspace file flow".to_owned()));
+    };
+    let mut attachments = Vec::with_capacity(paths.len());
+    for path in paths {
+        let name = agent_core::safe_file_name(path).map_err(|err| bad(err.message))?;
+        if !files.workspace.join(&name).is_file() {
+            return Err(bad(format!(
+                "attachment {name:?} is not an uploaded workspace file"
+            )));
+        }
+        attachments.push(agent_core::Artifact::new(
+            name.clone(),
+            agent_core::mime_hint(std::path::Path::new(&name)),
+        ));
+    }
+    Ok(attachments)
 }
 
 async fn post_abort(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
@@ -1248,6 +1295,62 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chat_attachments_are_validated_and_persisted_with_the_message() {
+        let state = AppState::fake();
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=photo.png",
+            b"\x89PNG".to_vec(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let thread = state.registry.create(None).unwrap().conversation_id();
+        let response = request(
+            &state,
+            axum::http::Method::POST,
+            "/api/chat",
+            Some(&json!({
+                "message": "rotate this",
+                "thread": thread,
+                "attachments": ["photo.png"],
+            })),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.unwrap();
+
+        let (status, json, _) =
+            get_json(&state, &format!("/api/threads/{thread}"), HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["history"][0]["role"], "user");
+        assert_eq!(json["history"][0]["artifacts"][0]["path"], "photo.png");
+        // API payloads stay snake_case (the persisted file uses `mimeHint`).
+        assert_eq!(json["history"][0]["artifacts"][0]["mime_hint"], "image/png");
+
+        // Traversal-shaped names and files that were never uploaded are both
+        // rejected before anything is sent.
+        for bad in ["../photo.png", "/etc/passwd", "never-uploaded.png"] {
+            let response = request(
+                &state,
+                axum::http::Method::POST,
+                "/api/chat",
+                Some(&json!({"message": "x", "thread": thread, "attachments": [bad]})),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     #[tokio::test]

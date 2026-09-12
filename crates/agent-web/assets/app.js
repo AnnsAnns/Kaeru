@@ -61,6 +61,9 @@
     threads: [],
     // Workspace files uploaded for the next message (M5).
     attachments: [],
+    // True briefly while the user toggles a card: growth from that action
+    // must not yank their scroll position.
+    suppressFollow: false,
   };
 
   // Blob URLs created for workspace files (images/downloads); revoked when the
@@ -153,14 +156,40 @@
   /* ---------- rendering ---------- */
 
   function isNearBottom() {
-    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+    if (messagesEl.scrollHeight <= messagesEl.clientHeight) return true;
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 16;
   }
   messagesEl.addEventListener("scroll", () => {
     state.sticky = isNearBottom();
   });
   function scrollToBottom(force) {
-    if (force || state.sticky) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (!force && !state.sticky) return;
+    state.sticky = true;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
   }
+
+  /* Content can grow without a delta: artifact images decode after their blob
+     URL resolves, cards lay out, fonts settle. When the user is pinned to the
+     end, keep the view there; a focused element inside the list means the user
+     is interacting (e.g. expanding a card), so leave their scroll alone. */
+  function followGrowth() {
+    if (!state.sticky || state.suppressFollow) return;
+    const active = document.activeElement;
+    if (active && messagesEl.contains(active)) return;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  function suppressFollowBriefly() {
+    state.suppressFollow = true;
+    setTimeout(() => {
+      state.suppressFollow = false;
+    }, 250);
+  }
+  new MutationObserver(followGrowth).observe(messagesEl, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
+  addEventListener("resize", followGrowth);
 
   function addBox(role, label) {
     const box = document.createElement("article");
@@ -353,8 +382,16 @@
       const box = addBox("kaeru", "kaeru · summary");
       box.body.textContent = payload.summary;
     }
+    // Tool results are stored without their name; map call id -> tool name
+    // from the assistant messages so the collapsed card can say which tool.
+    const toolNames = new Map();
     for (const message of payload.history || []) {
-      renderMessage(message);
+      for (const call of message.tool_calls || []) {
+        if (call && call.id) toolNames.set(call.id, call.name);
+      }
+    }
+    for (const message of payload.history || []) {
+      renderMessage(message, toolNames);
     }
     if ((payload.history || []).length || payload.summary) {
       scrollToBottom(true);
@@ -383,21 +420,42 @@
     return details;
   }
 
-  function renderMessage(message) {
+  /* The attachment note is part of the model-visible text; the UI shows the
+     files as cards instead, so strip our own trailing note on user messages. */
+  const ATTACH_NOTE = /\n\n\[attached in the workspace: [^\]]*\]$/;
+  function displayContent(message) {
+    if (
+      message.role === "user" &&
+      Array.isArray(message.artifacts) &&
+      message.artifacts.length
+    ) {
+      return (message.content || "").replace(ATTACH_NOTE, "");
+    }
+    return message.content;
+  }
+
+  function renderMessage(message, toolNames) {
     const role = message.role;
-    // Tool results (M3) render as their own compact card, not a chat bubble.
+    // Tool results (M3) collapse to a one-line card: the output is noise until
+    // asked for, and expanding is a click on the summary.
     if (role === "tool") {
-      const box = addBox("tool", "🔧 tool result");
+      const card = document.createElement("details");
+      card.className = "tool tool-result";
+      card.addEventListener("toggle", suppressFollowBriefly);
+      const summary = document.createElement("summary");
+      const name = toolNames?.get(message.tool_call_id);
+      summary.textContent = name ? `🔧 ${name} · result` : "🔧 tool result";
       const pre = document.createElement("pre");
       pre.className = "tool-body";
       pre.textContent = message.content || "";
-      box.body.append(pre);
-      return box;
+      card.append(summary, pre);
+      messagesEl.append(card);
+      return card;
     }
     const mine = role === "user";
     const box = addBox(mine ? "you" : "kaeru", mine ? "you" : "kaeru");
     if (mine) {
-      box.body.textContent = message.content;
+      box.body.textContent = displayContent(message);
     } else if (message.html) {
       box.body.classList.add("markdown");
       box.body.innerHTML = message.html;
@@ -407,6 +465,9 @@
     if (!mine && message.reasoning) {
       box.body.prepend(thinkingBlock(message.reasoning, false));
     }
+    // Workspace files attached to this message (M5): uploads on user
+    // messages, tool artifacts on the assistant answer.
+    renderArtifacts(box.body, message.artifacts);
     // The assistant's tool requests (M3) show as collapsed steps below.
     if (!mine && Array.isArray(message.tool_calls)) {
       const steps = document.createElement("div");
@@ -566,7 +627,8 @@
     if (!state.threadId) await createThread();
 
     // Uploaded workspace files ride along with the message as a plain note,
-    // so the model knows they exist (and that they live in the workspace).
+    // so the model knows they exist (and that they live in the workspace);
+    // the structured list is what the UI persists and re-renders.
     const attached = state.attachments.slice();
     const message = attached.length
       ? `${typed}\n\n[attached in the workspace: ${attached.join(", ")}]`
@@ -580,7 +642,14 @@
     state.stopped = false;
     removeEmptyHint();
 
-    addBox("you", "you").body.textContent = message;
+    // The optimistic bubble mirrors what a reload will render: the typed text
+    // plus the uploaded files as embedded cards (the note is model-facing).
+    const you = addBox("you", "you");
+    you.body.textContent = typed;
+    renderArtifacts(
+      you.body,
+      attached.map((path) => ({ path, mime_hint: null }))
+    );
     scrollToBottom(true);
     state.sticky = true;
 
@@ -590,6 +659,7 @@
 
     try {
       const payload = { message, thread: state.threadId };
+      if (attached.length) payload.attachments = attached;
       if (state.model) payload.model = state.model;
       // "" clears any per-thread override; the server then uses its default.
       payload.reasoning_effort = state.reasoningEffort || "";
@@ -664,6 +734,7 @@
   function toolCardFromCall(call) {
     const details = document.createElement("details");
     details.className = "tool";
+    details.addEventListener("toggle", suppressFollowBriefly);
     const summary = document.createElement("summary");
     summary.textContent = `🔧 ${call.name}`;
     const body = document.createElement("pre");
@@ -728,50 +799,107 @@
   /* Fetch a workspace file with the auth header and expose it as a blob URL;
      an <img>/<a> tag cannot carry a custom header, so this indirection is
      what keeps file serving authenticated (ADR-017). */
-  async function fileObjectUrl(path) {
+  async function fetchBlobUrl(path) {
     const encoded = path.split("/").map(encodeURIComponent).join("/");
     const response = await apiFetch(`/api/files/${encoded}`);
     if (!response.ok) throw await readApiError(response);
     const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
+    return URL.createObjectURL(blob);
+  }
+
+  /* Message images live until the thread view is replaced. */
+  async function trackedBlobUrl(path) {
+    const url = await fetchBlobUrl(path);
     objectUrls.push(url);
     return url;
   }
 
+  function mimeFromPath(path) {
+    switch ((path.split(".").pop() || "").toLowerCase()) {
+      case "png": return "image/png";
+      case "jpg": case "jpeg": return "image/jpeg";
+      case "gif": return "image/gif";
+      case "webp": return "image/webp";
+      case "csv": return "text/csv";
+      case "txt": case "md": case "log": return "text/plain";
+      case "json": return "application/json";
+      default: return "";
+    }
+  }
+  function isInlineImage(path, mimeHint) {
+    return /^image\/(png|jpeg|gif|webp)$/.test(mimeHint || mimeFromPath(path));
+  }
+  /* Types a browser renders inertly in a tab; HTML/SVG stay download-only so
+     a hostile artifact can never execute on our origin. */
+  function canOpenInTab(path, mimeHint) {
+    const mime = mimeHint || mimeFromPath(path);
+    return (
+      isInlineImage(path, mime) ||
+      ["text/plain", "text/csv", "application/json"].includes(mime)
+    );
+  }
+
   async function downloadArtifact(path) {
     try {
-      const url = await fileObjectUrl(path);
+      const url = await fetchBlobUrl(path);
       const link = document.createElement("a");
       link.href = url;
       link.download = path.split("/").pop() || "file";
       document.body.append(link);
       link.click();
       link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       reportError(err);
     }
   }
 
-  /* Artifact events (M5): images render inline, everything else becomes a
-     download card. */
-  function addArtifactCard(turn, event) {
+  async function openArtifact(path, mimeHint) {
+    if (!canOpenInTab(path, mimeHint)) return downloadArtifact(path);
+    try {
+      const url = await fetchBlobUrl(path);
+      window.open(url, "_blank", "noopener");
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      reportError(err);
+    }
+  }
+
+  function actionButton(label, handler) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "artifact-action";
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    return button;
+  }
+
+  /* One workspace file: an upload on a user message, a tool artifact on an
+     assistant answer, or a live `artifact` event. Images render inline,
+     text-ish types open in a tab, everything is downloadable. */
+  function artifactCard(path, mimeHint) {
     const card = document.createElement("div");
     card.className = "artifact";
+    const header = document.createElement("div");
+    header.className = "artifact-header";
     const name = document.createElement("span");
     name.className = "artifact-name";
-    name.textContent = `📎 ${event.path}`;
-    const download = document.createElement("button");
-    download.type = "button";
-    download.className = "artifact-download";
-    download.textContent = "download";
-    download.addEventListener("click", () => downloadArtifact(event.path));
-    card.append(name, download);
-    if ((event.mime_hint || "").startsWith("image/")) {
+    name.textContent = `📎 ${path}`;
+    const actions = document.createElement("span");
+    actions.className = "artifact-actions";
+    if (canOpenInTab(path, mimeHint)) {
+      actions.append(actionButton("open", () => openArtifact(path, mimeHint)));
+    }
+    actions.append(actionButton("download", () => downloadArtifact(path)));
+    header.append(name, actions);
+    card.append(header);
+    if (isInlineImage(path, mimeHint)) {
       const image = document.createElement("img");
       image.className = "artifact-image";
-      image.alt = event.path;
+      image.alt = path;
       image.loading = "lazy";
-      fileObjectUrl(event.path)
+      image.addEventListener("load", followGrowth, { once: true });
+      trackedBlobUrl(path)
         .then((url) => {
           image.src = url;
         })
@@ -780,8 +908,17 @@
         });
       card.append(image);
     }
-    turn.steps.append(card);
-    scrollToBottom();
+    return card;
+  }
+
+  function renderArtifacts(container, artifacts) {
+    if (!Array.isArray(artifacts) || artifacts.length === 0) return;
+    const wrap = document.createElement("div");
+    wrap.className = "artifacts";
+    for (const artifact of artifacts) {
+      wrap.append(artifactCard(artifact.path, artifact.mime_hint));
+    }
+    container.append(wrap);
   }
 
   function uploadFile(file) {
@@ -803,14 +940,54 @@
       });
   }
 
+  /* Attachment chips: image thumbnails and click-to-open; thumbs are revoked
+     when the attachment is removed. */
+  const attachmentThumbs = new Map();
+  function revokeStaleThumbs() {
+    for (const [path, url] of attachmentThumbs) {
+      if (!state.attachments.includes(path)) {
+        URL.revokeObjectURL(url);
+        attachmentThumbs.delete(path);
+      }
+    }
+  }
+  function attachmentThumb(path, image) {
+    const known = attachmentThumbs.get(path);
+    if (known) {
+      image.src = known;
+      return;
+    }
+    fetchBlobUrl(path)
+      .then((url) => {
+        attachmentThumbs.set(path, url);
+        image.src = url;
+      })
+      .catch(() => {
+        /* the plain chip remains usable */
+      });
+  }
+
   function renderAttachments() {
+    revokeStaleThumbs();
     attachmentsEl.replaceChildren();
     attachmentsEl.hidden = state.attachments.length === 0;
     for (const path of state.attachments) {
       const chip = document.createElement("span");
       chip.className = "attachment-chip";
-      const label = document.createElement("span");
+      if (isInlineImage(path, "")) {
+        const thumb = document.createElement("img");
+        thumb.className = "attachment-thumb";
+        thumb.alt = "";
+        thumb.loading = "lazy";
+        attachmentThumb(path, thumb);
+        chip.append(thumb);
+      }
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "attachment-name";
+      label.title = "Open";
       label.textContent = `📎 ${path}`;
+      label.addEventListener("click", () => openArtifact(path, ""));
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "attachment-remove";
@@ -850,10 +1027,11 @@
       case "tool_result": {
         const card = turn.cards[event.id];
         if (card) {
+          // Stay collapsed: the summary (red when failed) is the signal, the
+          // full output is one click away.
           card.classList.toggle("tool-error", !!event.is_error);
           const body = card.querySelector(".tool-body");
           if (body) body.textContent = event.output || "";
-          if (event.is_error) card.open = true;
         }
         scrollToBottom();
         break;
@@ -862,7 +1040,8 @@
         addApprovalCard(turn, event);
         break;
       case "artifact":
-        addArtifactCard(turn, event);
+        turn.steps.append(artifactCard(event.path, event.mime_hint));
+        scrollToBottom();
         break;
       case "turn_done":
         turn.terminal = true;

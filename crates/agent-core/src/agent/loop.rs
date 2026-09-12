@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::AgentCore;
 use crate::audit::AuditEntry;
 use crate::context;
-use crate::events::{ApprovalSink, CoreEvent, Decision, Risk, Usage};
+use crate::events::{ApprovalSink, Artifact, CoreEvent, Decision, Risk, Usage};
 use crate::llm::{ChatMessage, ChatRequest, ToolCall};
 use crate::tools::ToolRegistry;
 use crate::tools::{ArtifactSink, Tool, ToolContext};
@@ -51,6 +51,9 @@ pub struct TurnInput {
     pub approvals: Arc<dyn ApprovalSink>,
     pub turn_id: u64,
     pub max_steps: u32,
+    /// Workspace files tools surface during the turn (M5); the session
+    /// persists them on the final answer.
+    pub artifacts: Arc<Mutex<Vec<Artifact>>>,
 }
 
 /// The outcome of a turn: terminal state plus the messages produced.
@@ -81,6 +84,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
         approvals,
         turn_id,
         max_steps,
+        artifacts,
     } = input;
 
     let tools: ToolRegistry = core.tools().clone();
@@ -197,7 +201,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
         messages.push(assistant.clone());
         new_messages.push(assistant);
 
-        let context = core.tool_context(turn_id, Some(artifact_sink(&emitter)));
+        let context = core.tool_context(turn_id, Some(artifact_sink(&emitter, &artifacts)));
         for call in step_calls {
             if cancelled.load(Ordering::SeqCst) {
                 return LoopResult {
@@ -237,15 +241,19 @@ pub async fn run(input: TurnInput) -> LoopResult {
     }
 }
 
-/// Wire a tool's artifact output (M5) to the turn's event stream, so every
-/// frontend renders workspace files the same way.
-fn artifact_sink(emitter: &Emitter) -> ArtifactSink {
+/// Wire a tool's artifact output (M5) to the turn's event stream, and collect
+/// it for persistence on the final answer, so every frontend renders (and
+/// later reloads) workspace files the same way.
+fn artifact_sink(emitter: &Emitter, artifacts: &Arc<Mutex<Vec<Artifact>>>) -> ArtifactSink {
     let emitter = emitter.clone();
+    let artifacts = Arc::clone(artifacts);
     ArtifactSink::new(move |path, mime_hint| {
-        emitter.emit(CoreEvent::Artifact {
-            path: path.to_owned(),
-            mime_hint: mime_hint.map(str::to_owned),
-        });
+        let artifact = Artifact::new(path, mime_hint);
+        emitter.emit(CoreEvent::artifact(&artifact));
+        artifacts
+            .lock()
+            .expect("artifacts lock poisoned")
+            .push(artifact);
     })
 }
 

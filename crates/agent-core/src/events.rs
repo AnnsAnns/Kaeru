@@ -84,20 +84,29 @@ impl tokio_stream::Stream for EventStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<CoreEvent>> {
         let this = self.as_mut().get_mut();
-        loop {
-            if let Some(event) = this.replay.next() {
-                return Poll::Ready(Some(event));
+        if let Some(event) = this.replay.next() {
+            return Poll::Ready(Some(event));
+        }
+        let Some(live) = this.live.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match Pin::new(live).poll_next(cx) {
+            Poll::Ready(Some(Ok(event))) => Poll::Ready(Some(event)),
+            // A lagged consumer may have missed any event, including a
+            // consent card or the terminal event. Close the stream instead
+            // of silently skipping: a re-subscribe replays the turn buffer
+            // and recovers what was missed.
+            Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(skipped)))) => {
+                tracing::warn!(
+                    target: "agent_core::events",
+                    skipped,
+                    "event stream lagged; closing so the subscriber can replay"
+                );
+                this.live = None;
+                Poll::Ready(None)
             }
-            let Some(live) = this.live.as_mut() else {
-                return Poll::Ready(None);
-            };
-            match Pin::new(live).poll_next(cx) {
-                Poll::Ready(Some(Ok(event))) => return Poll::Ready(Some(event)),
-                // A lagged consumer only loses chat text, never correctness.
-                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => continue,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -371,6 +380,23 @@ mod tests {
             stream.recv().await,
             Err(broadcast::error::RecvError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_lagged_stream_closes_so_the_subscriber_can_replay() {
+        use tokio_stream::StreamExt as _;
+        let (tx, rx) = broadcast::channel(1);
+        let mut stream = EventStream::live(rx);
+        for i in 0..3 {
+            tx.send(CoreEvent::Delta {
+                text: format!("{i}"),
+            })
+            .unwrap();
+        }
+        assert!(
+            stream.next().await.is_none(),
+            "a lagged stream must close instead of silently skipping events"
+        );
     }
 
     #[test]

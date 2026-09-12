@@ -408,7 +408,7 @@ impl ChatSession {
 
     /// Record a consent decision for a pending `ApprovalRequest` (M3). An
     /// unknown request id is `NotFound` (already resolved or timed out).
-    pub async fn approve(&self, request_id: &str, decision: Decision) -> Result<()> {
+    pub fn approve(&self, request_id: &str, decision: Decision) -> Result<()> {
         let inner = self.lock();
         let Some(active) = &inner.active else {
             return Err(ApiError::new(
@@ -1368,10 +1368,7 @@ mod tests {
         // M3: the consent flow is implemented; an id nobody is waiting on is a
         // plain NotFound (already resolved or timed out).
         let session = ChatSession::new(core_with(FakeProvider::builtin()), "test");
-        let err = session
-            .approve("appr_1", Decision::Allow)
-            .await
-            .unwrap_err();
+        let err = session.approve("appr_1", Decision::Allow).unwrap_err();
         assert_eq!(err.kind, ApiErrorKind::NotFound);
         let _ = ApprovalKind::PackageInstall { packages: vec![] }; // M5 consent type
     }
@@ -1930,7 +1927,7 @@ mod tests {
             while let Ok(event) = tap.recv().await {
                 match event {
                     CoreEvent::ApprovalRequest { id, .. } => {
-                        approver.approve(&id, Decision::Allow).await.unwrap();
+                        approver.approve(&id, Decision::Allow).unwrap();
                         break;
                     }
                     CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
@@ -1988,7 +1985,7 @@ mod tests {
             while let Ok(event) = tap.recv().await {
                 match event {
                     CoreEvent::ApprovalRequest { id, .. } => {
-                        approver.approve(&id, Decision::Deny).await.unwrap();
+                        approver.approve(&id, Decision::Deny).unwrap();
                         break;
                     }
                     CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,

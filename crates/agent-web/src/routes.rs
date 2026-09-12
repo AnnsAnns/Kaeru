@@ -230,6 +230,9 @@ fn thread_error(err: &agent_core::ApiError) -> Response {
 
 /// Resolve the session a request targets: the named thread (404 if absent),
 /// else the newest thread, else a fresh one.
+///
+/// The error is boxed because `Response` is large enough to trip clippy's
+/// `result_large_err`; only the error path pays for the allocation.
 fn resolve_thread(
     state: &AppState,
     thread: Option<&str>,
@@ -250,7 +253,8 @@ fn resolve_thread(
     }
 }
 
-/// Resolve without ever creating a thread (for abort).
+/// Resolve without ever creating a thread (for abort). See [`resolve_thread`]
+/// for why the error is boxed.
 fn resolve_existing(
     state: &AppState,
     thread: Option<&str>,
@@ -355,7 +359,7 @@ async fn post_approval(State(state): State<AppState>, Json(body): Json<ApprovalB
             "no thread to approve for",
         );
     };
-    match session.approve(&body.id, body.decision).await {
+    match session.approve(&body.id, body.decision) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => thread_error(&err),
     }

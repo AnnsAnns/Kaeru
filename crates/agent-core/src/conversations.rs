@@ -259,14 +259,15 @@ fn migrate(text: &str) -> Result<Conversation> {
     let schema = value
         .get("schema")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| ApiError::internal("conversation file has no schema version"))?
-        as u32;
+        .ok_or_else(|| ApiError::internal("conversation file has no schema version"))?;
     if schema == 0 {
         return Err(ApiError::internal(
             "schema version 0 is not a valid conversation",
         ));
     }
-    if schema > CONVERSATION_SCHEMA_VERSION {
+    // Compare before any narrowing cast: a crafted `schema = 2^32 + 2` must
+    // not wrap to 2 and load as a valid v2 file.
+    if schema > u64::from(CONVERSATION_SCHEMA_VERSION) {
         return Err(ApiError::new(
             ApiErrorKind::Internal,
             format!(
@@ -547,6 +548,25 @@ mod tests {
         )
         .unwrap();
         assert!(store.load("default").unwrap().is_none());
+        assert!(dir.join("default.json.quarantine").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_schema_version_wider_than_u32_does_not_wrap_into_a_valid_one() {
+        let (store, dir) = temp_store("schema-wrap");
+        // 2^32 + 2 truncated to u32 would look exactly like a valid v2 file.
+        let mut value = serde_json::to_value(sample("default")).unwrap();
+        value["schema"] = serde_json::json!(4_294_967_298u64);
+        std::fs::write(
+            dir.join("default.json"),
+            serde_json::to_string(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            store.load("default").unwrap().is_none(),
+            "a wrapped schema must be quarantined, not loaded"
+        );
         assert!(dir.join("default.json.quarantine").is_file());
         std::fs::remove_dir_all(&dir).ok();
     }

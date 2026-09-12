@@ -3,6 +3,7 @@
 //! Raw pages never reach the main model (ADR-021).
 
 use serde_json::{Value, json};
+use tokio::task::JoinSet;
 
 use crate::agent::fence;
 use crate::error::ApiError;
@@ -69,14 +70,36 @@ impl Tool for WebSearchTool {
                 return Ok("No web results were found for this query.".to_owned());
             }
 
-            // Fetch the raw pages (untrusted) and build a cited corpus.
-            let mut corpus = String::new();
+            // Fetch the raw pages (untrusted) and build a cited corpus. Pages
+            // are fetched concurrently, so three slow sites do not stack their
+            // per-page timeouts into one long search.
             let fetched = hits.len().min(MAX_FETCHED_PAGES);
-            for hit in &hits[..fetched] {
-                let body = match ctx.search.fetch(hit.url.clone()).await {
-                    Ok(text) if !text.trim().is_empty() => text,
-                    _ => hit.snippet.clone(),
-                };
+            let mut bodies: Vec<Option<String>> = vec![None; fetched];
+            if fetched > 0 {
+                let mut set = JoinSet::new();
+                for (index, hit) in hits[..fetched].iter().enumerate() {
+                    let search = std::sync::Arc::clone(&ctx.search);
+                    let url = hit.url.clone();
+                    set.spawn(async move { (index, search.fetch(url).await) });
+                }
+                while let Some(joined) = set.join_next().await {
+                    match joined {
+                        Ok((index, Ok(text))) if !text.trim().is_empty() => {
+                            bodies[index] = Some(text);
+                        }
+                        Ok(_) => {}
+                        Err(err) => tracing::warn!(
+                            target: "agent_core::tools",
+                            "page fetch task failed: {err}"
+                        ),
+                    }
+                }
+            }
+            // Results stay in search order regardless of which fetch finished
+            // first; a failed or empty fetch degrades to the hit's snippet.
+            let mut corpus = String::new();
+            for (index, hit) in hits[..fetched].iter().enumerate() {
+                let body = bodies[index].as_deref().unwrap_or(hit.snippet.as_str());
                 corpus.push_str(&format!("\n\n[{}] {}\n{}", hit.url, hit.title, body));
             }
             for hit in &hits[fetched..] {

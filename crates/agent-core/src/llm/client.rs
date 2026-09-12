@@ -33,6 +33,12 @@ pub const CLIENT_EVENT_CAPACITY: usize = 64;
 /// `index + 1` allocation; fragments at or above this bound are dropped.
 pub const MAX_TOOL_CALLS: usize = 64;
 
+/// How long a provider request may go without a byte arriving before it is
+/// treated as stalled. The clock resets after every successful read, so this
+/// bounds a silent connection without cutting off a long, actively streaming
+/// answer.
+const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub type ChatFuture = Pin<Box<dyn Future<Output = Result<mpsc::Receiver<CoreEvent>>> + Send>>;
 pub type ModelsFuture = Pin<Box<dyn Future<Output = Result<Vec<ModelInfo>>> + Send>>;
 
@@ -57,6 +63,7 @@ impl HttpClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
+            .read_timeout(PROVIDER_READ_TIMEOUT)
             .build()
             .map_err(|e| ApiError::internal(format!("failed to build http client: {e}")))?;
         let base_url = base_url.into();

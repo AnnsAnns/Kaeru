@@ -33,11 +33,16 @@ impl SseParser {
     /// Feed a chunk; returns every complete event's `data` payload.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
         if !self.started {
+            self.pending.extend_from_slice(bytes);
+            // Decide on the BOM only once enough bytes have arrived: a chunk
+            // boundary can split it, and deciding early would leak BOM bytes
+            // into the first line.
+            if self.pending.len() < BOM.len() && !self.pending.contains(&b'\n') {
+                return Vec::new();
+            }
             self.started = true;
-            if bytes.starts_with(BOM) {
-                self.pending.extend_from_slice(&bytes[BOM.len()..]);
-            } else {
-                self.pending.extend_from_slice(bytes);
+            if self.pending.starts_with(BOM) {
+                self.pending.drain(..BOM.len());
             }
         } else {
             self.pending.extend_from_slice(bytes);
@@ -215,6 +220,27 @@ mod tests {
         let mut parser = SseParser::new();
         let out = parser.push("\u{FEFF}data: b\n\n".as_bytes());
         assert_eq!(out, vec!["b"]);
+    }
+
+    #[test]
+    fn strips_a_bom_split_across_chunks() {
+        // A 1-2 byte first chunk must not leak BOM bytes into the first line.
+        let bytes = "\u{FEFF}data: b\n\n".as_bytes();
+        for split in 1..BOM.len() {
+            let mut parser = SseParser::new();
+            let mut out = parser.push(&bytes[..split]);
+            out.extend(parser.push(&bytes[split..]));
+            out.extend(parser.finish());
+            assert_eq!(out, vec!["b"], "split after {split} byte(s)");
+        }
+    }
+
+    #[test]
+    fn a_short_first_chunk_is_held_until_it_can_be_decided() {
+        let mut parser = SseParser::new();
+        // Two bytes without a newline cannot form an event; hold them.
+        assert!(parser.push(b"da").is_empty());
+        assert_eq!(parser.push(b"ta: x\n\n"), vec!["x"]);
     }
 
     #[test]

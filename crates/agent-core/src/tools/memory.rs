@@ -107,7 +107,7 @@ impl Tool for MemoryWriteTool {
                 let fenced = fence("memory_candidate", &content);
                 match ctx
                     .workers
-                    .run("distiller", &fenced, &ctx.audit, ctx.turn_id)
+                    .run("distiller", &fenced, &ctx.audit, Some(ctx.turn_id))
                     .await
                 {
                     Ok(output) => {

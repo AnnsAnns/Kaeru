@@ -253,7 +253,7 @@ impl Reflector {
             Err(err) => (format!("error: {}", err.kind.as_str()), json!({})),
         };
         self.core.audit().append(&AuditEntry {
-            turn_id: 0,
+            turn_id: None,
             tool: "reflect".to_owned(),
             input,
             decision: None,
@@ -311,7 +311,7 @@ impl Reflector {
             let output = self
                 .core
                 .workers()
-                .run("reflector", &content, self.core.audit(), 0)
+                .run("reflector", &content, self.core.audit(), None)
                 .await?;
             let reflection = parse_reflection(&output.text);
             if reflection.notes.is_empty() && reflection.persona.is_none() {
@@ -413,7 +413,7 @@ impl Reflector {
         self.memory
             .write(&note, &[REFLECT_TAG.to_owned(), PERSONA_TAG.to_owned()])?;
         self.core.audit().append(&AuditEntry {
-            turn_id: 0,
+            turn_id: None,
             tool: PERSONA_TAG.to_owned(),
             input: json!({
                 "applied": applied.is_some(),

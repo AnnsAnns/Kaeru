@@ -301,7 +301,7 @@ async fn execute_call(
     });
 
     core.audit().append(&AuditEntry {
-        turn_id,
+        turn_id: Some(turn_id),
         tool: call.name.clone(),
         // `null` stays `null`: the audit log skips null inputs.
         input: call.arguments.clone(),

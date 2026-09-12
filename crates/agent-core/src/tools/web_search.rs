@@ -111,7 +111,7 @@ impl Tool for WebSearchTool {
             let fenced = fence("web_search", &corpus);
             match ctx
                 .workers
-                .run("summarizer", &fenced, &ctx.audit, ctx.turn_id)
+                .run("summarizer", &fenced, &ctx.audit, Some(ctx.turn_id))
                 .await
             {
                 Ok(output) => Ok(output.text),

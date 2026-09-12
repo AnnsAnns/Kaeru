@@ -10,11 +10,13 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// One audit line. `status` is a short outcome word (`ok`, `error`, `denied`);
-/// `decision` is present only when the tool went through the consent flow.
+/// One audit line. `status` is a short outcome word (`ok`, `error:<kind>`,
+/// `denied`); `decision` is present only when the tool went through the
+/// consent flow; `turn_id` is absent for work outside a turn (reflection).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditEntry {
-    pub turn_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
     /// Tool name, or `worker:<name>` for a worker sub-call (ADR-021).
     pub tool: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -97,7 +99,7 @@ mod tests {
         let path = temp_path("append");
         let log = AuditLog::new(&path);
         log.append(&AuditEntry {
-            turn_id: 1,
+            turn_id: Some(1),
             tool: "web_search".into(),
             input: serde_json::json!({"query": "frogs"}),
             decision: None,
@@ -106,7 +108,7 @@ mod tests {
             duration_ms: 12,
         });
         log.append(&AuditEntry {
-            turn_id: 1,
+            turn_id: Some(1),
             tool: "memory_write".into(),
             input: serde_json::json!({"content": "note"}),
             decision: Some("deny".into()),
@@ -130,7 +132,7 @@ mod tests {
     fn disabled_log_writes_nothing() {
         let log = AuditLog::disabled();
         log.append(&AuditEntry {
-            turn_id: 1,
+            turn_id: Some(1),
             tool: "web_search".into(),
             input: serde_json::Value::Null,
             decision: None,

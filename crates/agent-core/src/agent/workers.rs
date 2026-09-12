@@ -126,27 +126,29 @@ impl Workers {
         name: &str,
         content: &str,
         audit: &AuditLog,
-        turn_id: u64,
+        turn_id: Option<u64>,
     ) -> Result<WorkerOutput> {
         let spec = self
             .spec(name)
             .ok_or_else(|| ApiError::internal(format!("no worker named {name:?}")))?;
         let started = Instant::now();
         let result = self.call(spec, content).await;
-        let (status, usage_out) = match &result {
+        let (status, usage) = match &result {
             Ok(output) => ("ok".to_owned(), output.usage),
-            Err(err) => (format!("error: {}", err.kind.as_str()), Usage::default()),
+            Err(err) => (format!("error:{}", err.kind.as_str()), Usage::default()),
         };
         audit.append(&AuditEntry {
             turn_id,
             tool: format!("worker:{name}"),
-            input: serde_json::json!({ "chars": content.chars().count() }),
+            input: serde_json::json!({
+                "chars": content.chars().count(),
+                "usage": usage,
+            }),
             decision: None,
             model: Some(spec.model.clone()),
             status,
             duration_ms: started.elapsed().as_millis() as u64,
         });
-        let _ = usage_out;
         result
     }
 
@@ -310,7 +312,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
         let workers = Workers::from_config(Arc::clone(&client), model, &WorkersConfig::default());
         let output = workers
-            .run("summarizer", "raw page text", &AuditLog::disabled(), 1)
+            .run("summarizer", "raw page text", &AuditLog::disabled(), Some(1))
             .await
             .unwrap();
         assert_eq!(output.text, "A summary");
@@ -358,7 +360,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
         let workers = Workers::disabled(client);
         let err = workers
-            .run("nope", "x", &AuditLog::disabled(), 1)
+            .run("nope", "x", &AuditLog::disabled(), Some(1))
             .await
             .unwrap_err();
         assert_eq!(err.kind, ApiErrorKind::Internal);

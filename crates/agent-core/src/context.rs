@@ -14,10 +14,7 @@
 
 use crate::events::Usage;
 use crate::llm::{ChatMessage, ChatRequest, LlmClient, Role};
-
-/// Deterministic token estimate: ~4 characters per token. Deliberately
-/// crude and stable — the budget governs shape, not billing.
-pub const CHARS_PER_TOKEN: u64 = 4;
+use crate::util::{CHARS_PER_TOKEN, truncate_chars};
 
 /// Upper bound for stored summaries; a summary may never outgrow the turns
 /// it replaces.
@@ -154,7 +151,7 @@ pub async fn summarize(
                 );
                 fallback_summary(previous, dropped)
             } else {
-                truncate(text, SUMMARY_MAX_CHARS)
+                truncate_chars(text, SUMMARY_MAX_CHARS)
             }
         }
         Err(err) => {
@@ -210,21 +207,8 @@ fn fallback_summary(previous: Option<&str>, dropped: &[ChatMessage]) -> String {
         excerpt.push_str(&format!("\n[{}] {}", message.role, message.content));
     }
     text.push_str("\n\n");
-    text.push_str(&truncate(&excerpt, FALLBACK_EXCERPT_CHARS));
-    truncate(&text, SUMMARY_MAX_CHARS)
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        return text.to_owned();
-    }
-    let mut cut = max_chars;
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut truncated = text[..cut].to_owned();
-    truncated.push('…');
-    truncated
+    text.push_str(&truncate_chars(&excerpt, FALLBACK_EXCERPT_CHARS));
+    truncate_chars(&text, SUMMARY_MAX_CHARS)
 }
 
 #[cfg(test)]
@@ -429,8 +413,8 @@ mod tests {
 
     #[test]
     fn truncate_respects_char_boundaries() {
-        assert_eq!(truncate("abc", 10), "abc");
-        let truncated = truncate("héllo wörld", 5);
+        assert_eq!(truncate_chars("abc", 10), "abc");
+        let truncated = truncate_chars("héllo wörld", 5);
         assert!(truncated.starts_with("h"));
         assert!(truncated.ends_with('…'));
         assert!(truncated.chars().count() <= 6);

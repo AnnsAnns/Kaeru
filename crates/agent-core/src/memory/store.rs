@@ -135,11 +135,7 @@ impl MemoryStore {
     /// the body and tags), best match first, then newest. An empty query
     /// returns the newest `limit` notes.
     pub fn search(&self, query: &str, limit: usize) -> Vec<MemoryNote> {
-        let terms: Vec<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .map(|term| term.to_lowercase())
-            .filter(|term| !term.is_empty())
-            .collect();
+        let terms = super::query_terms(query, 1);
         if terms.is_empty() {
             return self.list().into_iter().take(limit).collect();
         }
@@ -147,7 +143,7 @@ impl MemoryStore {
             .list()
             .into_iter()
             .filter_map(|note| {
-                let score = score_note(&note, &terms);
+                let score = super::score_note(&note, &terms);
                 (score > 0).then_some((score, note))
             })
             .collect();
@@ -269,25 +265,6 @@ fn modified_unix(path: &Path) -> u64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// How well a note matches the query terms: a tag hit counts for more than a
-/// body hit.
-fn score_note(note: &MemoryNote, terms: &[String]) -> usize {
-    let body = note.content.to_lowercase();
-    let tags: Vec<String> = note.tags.iter().map(|tag| tag.to_lowercase()).collect();
-    terms
-        .iter()
-        .map(|term| {
-            if tags.iter().any(|tag| tag.contains(term.as_str())) {
-                3
-            } else if body.contains(term.as_str()) {
-                1
-            } else {
-                0
-            }
-        })
-        .sum()
 }
 
 /// Today's date (`YYYY-MM-DD`) in the owner's **local** time zone.

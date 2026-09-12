@@ -22,6 +22,7 @@ use crate::audit::AuditEntry;
 use crate::conversations::{Conversation, ConversationStore, rfc3339_from_unix};
 use crate::error::{ApiError, Result};
 use crate::memory::store::{MemoryStore, local_date_from_unix, local_minutes_from_unix, now_unix};
+use crate::util::{parse_tag_line, truncate_chars};
 
 /// How often the scheduler wakes to check the clock.
 pub const REFLECT_TICK: Duration = Duration::from_secs(60);
@@ -627,33 +628,12 @@ fn parse_segment(segment: &str) -> Option<ReflectedNote> {
     })
 }
 
-fn parse_tag_line(line: &str) -> Vec<String> {
-    let line = line.trim();
-    let line = line
-        .strip_prefix("tags:")
-        .or_else(|| line.strip_prefix("Tags:"))
-        .unwrap_or(line);
-    line.split(',')
-        .map(|tag| tag.trim().trim_matches(['[', ']', '"', '\'']).to_owned())
-        .filter(|tag| !tag.is_empty())
-        .collect()
-}
-
 /// Always include the `reflect` tag, without duplicating it.
 fn with_reflect_tag(mut tags: Vec<String>) -> Vec<String> {
     if !tags.iter().any(|tag| tag.eq_ignore_ascii_case(REFLECT_TAG)) {
         tags.push(REFLECT_TAG.to_owned());
     }
     tags
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 /// Write the persona file atomically (tmp + rename), creating its parent.

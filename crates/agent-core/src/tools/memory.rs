@@ -12,6 +12,7 @@ use crate::error::ApiError;
 use crate::events::{ApprovalKind, Risk};
 use crate::memory::store::MemoryStore;
 use crate::tools::{Tool, ToolContext, ToolFuture};
+use crate::util::parse_tag_line;
 
 /// Most notes a single `memory_search` returns.
 const MAX_SEARCH_RESULTS: usize = 20;
@@ -263,18 +264,6 @@ fn parse_distilled(text: &str) -> (Vec<String>, String) {
     }
     let tags = parse_tag_line(&tags.join(" "));
     (tags, body.to_owned())
-}
-
-fn parse_tag_line(line: &str) -> Vec<String> {
-    let line = line.trim();
-    let line = line
-        .strip_prefix("tags:")
-        .or_else(|| line.strip_prefix("Tags:"))
-        .unwrap_or(line);
-    line.split(',')
-        .map(|tag| tag.trim().trim_matches(['[', ']', '"', '\'']).to_owned())
-        .filter(|tag| !tag.is_empty())
-        .collect()
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::config::{SearchConfig, SearchProviderKind};
 use crate::error::{ApiError, ApiErrorKind, Result};
+use crate::util::truncate_chars;
 
 /// Hard cap on fetched page text fed to the summarizer (context hygiene).
 pub const MAX_PAGE_CHARS: usize = 20_000;
@@ -293,7 +294,7 @@ async fn checked_json(response: reqwest::Response) -> Result<serde_json::Value> 
             format!(
                 "search provider returned HTTP {}: {}",
                 status.as_u16(),
-                truncate(&body, 300)
+                truncate_chars(&body, 300)
             ),
         ));
     }
@@ -309,14 +310,6 @@ fn search_protocol_error(e: serde_json::Error) -> ApiError {
         ApiErrorKind::Protocol,
         format!("search provider response is not understood: {e}"),
     )
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_owned()
-    } else {
-        format!("{}…", s.chars().take(max_chars).collect::<String>())
-    }
 }
 
 /// Strip an HTML document to plain text: drop `<script>`/`<style>` bodies,

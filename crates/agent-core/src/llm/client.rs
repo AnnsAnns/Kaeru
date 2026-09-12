@@ -24,6 +24,7 @@ use crate::llm::types::{
     ChatRequest, ModelInfo, WireChatRequest, WireChunk, WireCompletion, WireDeltaToolCall,
     WireErrorBody, WireModelList,
 };
+use crate::util::truncate_chars;
 
 /// Backpressure channel from the adapter to the session layer.
 pub const CLIENT_EVENT_CAPACITY: usize = 64;
@@ -461,19 +462,14 @@ fn provider_error_event(status: u16, body: &str) -> CoreEvent {
         .and_then(|e| e.message)
         .unwrap_or_default();
     let message = if detail.is_empty() {
-        format!("provider returned HTTP {status}: {}", truncate(body, 300))
+        format!(
+            "provider returned HTTP {status}: {}",
+            truncate_chars(body, 300)
+        )
     } else {
         format!("provider returned HTTP {status}: {detail}")
     };
     CoreEvent::Error { kind, message }
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_owned()
-    } else {
-        format!("{}…", s.chars().take(max_chars).collect::<String>())
-    }
 }
 
 #[cfg(test)]

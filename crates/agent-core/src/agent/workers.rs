@@ -14,9 +14,7 @@ use crate::config::WorkersConfig;
 use crate::error::{ApiError, ApiErrorKind, Result};
 use crate::events::{CoreEvent, Usage};
 use crate::llm::{ChatMessage, ChatRequest, LlmClient};
-
-/// Conservative characters-per-token used to bound worker output.
-const CHARS_PER_TOKEN: usize = 4;
+use crate::util::{CHARS_PER_TOKEN, truncate_chars};
 
 /// Runtime shape of a worker (plan §5.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,9 +188,9 @@ impl Workers {
                 format!("worker {} produced no text", spec.name),
             ));
         }
-        let cap = spec.max_output_tokens as usize * CHARS_PER_TOKEN;
+        let cap = spec.max_output_tokens as usize * CHARS_PER_TOKEN as usize;
         Ok(WorkerOutput {
-            text: truncate(text, cap),
+            text: truncate_chars(text, cap),
             usage,
         })
     }
@@ -263,14 +261,6 @@ fn spec_from(
     }
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.to_owned()
-    } else {
-        format!("{}…", text.chars().take(max_chars).collect::<String>())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,7 +302,12 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
         let workers = Workers::from_config(Arc::clone(&client), model, &WorkersConfig::default());
         let output = workers
-            .run("summarizer", "raw page text", &AuditLog::disabled(), Some(1))
+            .run(
+                "summarizer",
+                "raw page text",
+                &AuditLog::disabled(),
+                Some(1),
+            )
             .await
             .unwrap();
         assert_eq!(output.text, "A summary");

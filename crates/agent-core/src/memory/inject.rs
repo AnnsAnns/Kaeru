@@ -6,7 +6,9 @@
 //! overlap, then recency) and the block is bounded, so memory can never crowd
 //! out the conversation window.
 
+use super::{query_terms, score_note};
 use crate::memory::store::{MemoryNote, MemoryStore};
+use crate::util::{CHARS_PER_TOKEN, truncate_chars};
 
 /// How much of the prompt budget the memory block may spend (estimated tokens).
 pub const MEMORY_BLOCK_BUDGET_TOKENS: u64 = 800;
@@ -19,9 +21,6 @@ pub const MEMORY_MAX_NOTES: usize = 8;
 
 /// Notes injected when nothing matches the query (recency fallback).
 const MEMORY_FALLBACK_NOTES: usize = 3;
-
-/// Same crude estimate the context budget uses (ADR-018): ~4 chars/token.
-const CHARS_PER_TOKEN: u64 = 4;
 
 /// Build the memory block for a turn, or `None` when there is nothing to add.
 pub fn memory_block(store: &MemoryStore, query: &str) -> Option<String> {
@@ -38,7 +37,7 @@ pub fn memory_block_with_budget(
     if notes.is_empty() {
         return None;
     }
-    let terms = query_terms(query);
+    let terms = query_terms(query, 3);
     let selected = select(&notes, &terms);
     if selected.is_empty() {
         return None;
@@ -54,7 +53,7 @@ fn select<'a>(notes: &'a [MemoryNote], terms: &[String]) -> Vec<&'a MemoryNote> 
     }
     let mut scored: Vec<(usize, &MemoryNote)> = notes
         .iter()
-        .map(|note| (score(note, terms), note))
+        .map(|note| (score_note(note, terms), note))
         .filter(|(score, _)| *score > 0)
         .collect();
     if scored.is_empty() {
@@ -106,49 +105,6 @@ fn render_note(note: &MemoryNote) -> String {
     } else {
         format!("- [{}] ({}) {content}", note.day, note.tags.join(", "))
     }
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(max_chars - 1).collect();
-    out.push('…');
-    out
-}
-
-/// Query terms worth matching on: lowercased words of at least three
-/// characters, deduped, in order.
-fn query_terms(query: &str) -> Vec<String> {
-    let mut terms: Vec<String> = Vec::new();
-    for term in query.split(|c: char| !c.is_alphanumeric()) {
-        let term = term.to_lowercase();
-        if term.chars().count() >= 3 && !terms.contains(&term) {
-            terms.push(term);
-        }
-    }
-    terms
-}
-
-/// Term-overlap score; a tag hit outranks a body hit.
-fn score(note: &MemoryNote, terms: &[String]) -> usize {
-    let body = note.content.to_lowercase();
-    let tags: Vec<String> = note.tags.iter().map(|tag| tag.to_lowercase()).collect();
-    terms
-        .iter()
-        .map(|term| {
-            if tags.iter().any(|tag| tag.contains(term.as_str())) {
-                3
-            } else if body.contains(term.as_str()) {
-                1
-            } else {
-                0
-            }
-        })
-        .sum()
 }
 
 #[cfg(test)]
@@ -212,7 +168,7 @@ mod tests {
     #[test]
     fn query_terms_ignore_short_words_and_duplicates() {
         assert_eq!(
-            query_terms("The Rust rust ox"),
+            query_terms("The Rust rust ox", 3),
             vec!["the".to_string(), "rust".to_string()]
         );
     }

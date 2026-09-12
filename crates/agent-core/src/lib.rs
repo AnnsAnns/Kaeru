@@ -21,6 +21,7 @@ pub mod memory;
 pub mod search;
 pub mod session;
 pub mod tools;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::Arc;

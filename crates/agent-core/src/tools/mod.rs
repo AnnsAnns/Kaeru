@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::events::Risk;
 use crate::llm::LlmClient;
 use crate::search::SearchProvider;
+use crate::util::truncate_chars;
 
 pub use crate::memory::MemoryStore;
 pub use memory::{MemorySearchTool, MemoryWriteTool};
@@ -79,12 +80,7 @@ pub trait Tool: Send + Sync {
 /// One-line, length-bounded preview of a tool call's input for the consent
 /// card.
 fn summarize_input(input: &Value) -> String {
-    let text = serde_json::to_string(input).unwrap_or_default();
-    if text.chars().count() <= 120 {
-        text
-    } else {
-        format!("{}…", text.chars().take(120).collect::<String>())
-    }
+    truncate_chars(&serde_json::to_string(input).unwrap_or_default(), 120)
 }
 
 /// The set of tools a turn may call.

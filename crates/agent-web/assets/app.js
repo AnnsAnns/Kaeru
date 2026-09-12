@@ -79,12 +79,28 @@
   // Every /api/* call carries the shared secret when one is stored. It is
   // entered once per browser (see showTokenPrompt) and never leaves the
   // browser except as this header — the provider key never reaches it.
-  function apiFetch(path, options = {}) {
+
+  // A rejected request is handled once, here: show the token prompt and stop
+  // the caller with a marker the UI silently ignores. Callers may pass their
+  // own retry (default: bootstrap).
+  class AuthRequired extends Error {
+    constructor() {
+      super("auth required");
+      this.name = "AuthRequired";
+    }
+  }
+
+  async function apiFetch(path, options = {}, onAuth) {
     const token = localStorage.getItem(AUTH_KEY);
     if (token) {
       options.headers = { ...(options.headers || {}), "x-auth-token": token };
     }
-    return fetch(path, options);
+    const response = await fetch(path, options);
+    if (response.status === 401) {
+      showTokenPrompt(onAuth || (() => bootstrap()));
+      throw new AuthRequired();
+    }
+    return response;
   }
 
   function showTokenPrompt(retry) {
@@ -185,6 +201,12 @@
     scrollToBottom();
   }
 
+  // Surface an error unless its prompt is already on screen (401).
+  function reportError(err) {
+    if (err && err.name === "AuthRequired") return;
+    addErrorBox(err.message || String(err));
+  }
+
   function fmtUsage(usage) {
     if (!usage) return "";
     const parts = [];
@@ -279,7 +301,7 @@
       del.textContent = "🗑";
       del.addEventListener("click", (event) => {
         event.stopPropagation();
-        deleteThread(thread.id);
+        deleteThread(thread.id).catch(reportError);
       });
 
       item.append(open, del);
@@ -289,10 +311,6 @@
 
   async function loadThreads() {
     const response = await apiFetch("/api/threads");
-    if (response.status === 401) {
-      showTokenPrompt(() => bootstrap());
-      return;
-    }
     if (!response.ok) throw await readApiError(response);
     const body = await response.json();
     state.threads = body.threads || [];
@@ -390,10 +408,6 @@
   async function selectThread(id) {
     if (state.streaming) await stop();
     const response = await apiFetch(`/api/threads/${encodeURIComponent(id)}`);
-    if (response.status === 401) {
-      showTokenPrompt(() => bootstrap());
-      return;
-    }
     if (response.status === 404) {
       localStorage.removeItem(THREAD_KEY);
       await bootstrap();
@@ -462,6 +476,7 @@
       terminal: false,
       errorMsg: null,
       aborted: false,
+      auth: false,
     };
     turn.paint = () => {
       if (turn.reasoning) {
@@ -507,12 +522,15 @@
       if (!turn.text) turn.ai.box.remove();
       turn.ai.label.textContent = "kaeru · error";
       addErrorBox(turn.errorMsg, message);
+    } else if (turn.auth) {
+      // The shared-secret prompt is already on screen; drop the empty box.
+      turn.ai.box.remove();
     } else if (turn.aborted || (state.stopped && !turn.terminal)) {
       turn.ai.label.textContent = "kaeru · stopped";
     } else if (!turn.terminal) {
       // The turn is still running server-side: re-attach and replay it (M3).
       turn.ai.label.textContent = "kaeru · reconnecting…";
-      setTimeout(() => attachStream().catch(() => {}), 1000);
+      setTimeout(() => attachStream(turn).catch(() => {}), 1000);
     } else {
       // Completed: swap the streamed plain text for the server's rendered
       // HTML (the same renderer used on reload).
@@ -563,6 +581,8 @@
     } catch (err) {
       if (err.name === "AbortError") {
         turn.aborted = true;
+      } else if (err.name === "AuthRequired") {
+        turn.auth = true;
       } else {
         turn.errorMsg = err.message || String(err);
       }
@@ -584,14 +604,15 @@
       if (!response.ok) throw await readApiError(response);
       await readStream(response, turn);
     } catch (err) {
-      turn.errorMsg = err.message || String(err);
+      if (err.name === "AuthRequired") turn.auth = true;
+      else turn.errorMsg = err.message || String(err);
     } finally {
       await finishTurn(turn, null);
     }
   }
 
   /* Re-attach to the active turn after a reconnect/reload (M3, §6.3a). */
-  async function attachStream() {
+  async function attachStream(previous) {
     if (state.streaming || !state.threadId) return;
     let response;
     try {
@@ -599,13 +620,19 @@
     } catch {
       return;
     }
-    if (response.status === 204 || !response.ok) return;
+    if (response.status === 204 || !response.ok) {
+      // The turn finished between scheduling and re-attach: say so instead of
+      // leaving the previous box labelled "reconnecting…".
+      if (previous) previous.ai.label.textContent = "kaeru · finished";
+      return;
+    }
     setBusy(true);
     const turn = newTurnView("kaeru · resuming");
     try {
       await readStream(response, turn);
     } catch (err) {
-      turn.errorMsg = err.message || String(err);
+      if (err.name === "AuthRequired") turn.auth = true;
+      else turn.errorMsg = err.message || String(err);
     } finally {
       await finishTurn(turn, null);
     }
@@ -658,7 +685,9 @@
         }: ${event.summary || ""}`;
         row.remove();
       } catch (err) {
-        text.textContent = `could not record decision: ${err.message || err}`;
+        if (err.name !== "AuthRequired") {
+          text.textContent = `could not record decision: ${err.message || err}`;
+        }
         allow.disabled = false;
         deny.disabled = false;
       }
@@ -768,10 +797,10 @@
   sendBtn.addEventListener("click", () => sendMessage(composerEl.value));
   stopBtn.addEventListener("click", stop);
   regenBtn.addEventListener("click", () => {
-    regenerate().catch((err) => addErrorBox(err.message || String(err)));
+    regenerate().catch(reportError);
   });
   newThreadBtn.addEventListener("click", () => {
-    createThread().catch((err) => addErrorBox(err.message || String(err)));
+    createThread().catch(reportError);
   });
   threadsBtn.addEventListener("click", () => {
     const open = workspaceEl.classList.toggle("sidebar-open");
@@ -809,11 +838,7 @@
     const path = query
       ? `/api/memory?q=${encodeURIComponent(query)}`
       : "/api/memory";
-    const response = await apiFetch(path);
-    if (response.status === 401) {
-      showTokenPrompt(() => loadMemory(query));
-      return;
-    }
+    const response = await apiFetch(path, {}, () => loadMemory(query));
     if (!response.ok) throw await readApiError(response);
     const body = await response.json();
     renderMemory(body.notes || []);
@@ -829,16 +854,12 @@
     const open = workspaceEl.classList.toggle("memory-open");
     memoryBtn.setAttribute("aria-expanded", String(open));
     if (open) {
-      loadMemory(memoryQueryEl.value.trim()).catch((err) =>
-        addErrorBox(err.message || String(err)),
-      );
+      loadMemory(memoryQueryEl.value.trim()).catch(reportError);
     }
   });
   memoryFormEl.addEventListener("submit", (event) => {
     event.preventDefault();
-    loadMemory(memoryQueryEl.value.trim()).catch((err) =>
-      addErrorBox(err.message || String(err)),
-    );
+    loadMemory(memoryQueryEl.value.trim()).catch(reportError);
   });
 
   // Evening reflection on demand (M4.5): the same digest the nightly job runs.
@@ -857,17 +878,17 @@
   reflectBtn.addEventListener("click", async () => {
     reflectBtn.disabled = true;
     try {
-      const response = await apiFetch("/api/reflect", { method: "POST" });
-      if (response.status === 401) {
-        showTokenPrompt(() => reflectBtn.click());
-        return;
-      }
+      const response = await apiFetch(
+        "/api/reflect",
+        { method: "POST" },
+        () => reflectBtn.click(),
+      );
       if (!response.ok) throw await readApiError(response);
       const outcome = await response.json();
       refreshReflectStatus(outcome);
       loadMemory(memoryQueryEl.value.trim()).catch(() => {});
     } catch (err) {
-      addErrorBox(err.message || String(err));
+      reportError(err);
     } finally {
       reflectBtn.disabled = false;
     }
@@ -968,10 +989,6 @@
     const saved = localStorage.getItem(THREAD_KEY);
     if (saved) {
       const response = await apiFetch(`/api/threads/${encodeURIComponent(saved)}`);
-      if (response.status === 401) {
-        showTokenPrompt(() => bootstrap());
-        return;
-      }
       if (response.ok) {
         renderThread(await response.json());
         await loadThreads();
@@ -985,7 +1002,5 @@
     else await createThread();
   }
 
-  bootstrap().catch((err) => {
-    addErrorBox(err.message || String(err));
-  });
+  bootstrap().catch(reportError);
 })();

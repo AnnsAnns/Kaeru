@@ -256,14 +256,22 @@ async fn execute_call(
     let started = Instant::now();
     let mut decision: Option<Decision> = None;
     let (output, is_error, status) = match tools.get(&call.name) {
-        None => (
-            format!(
-                "Unknown tool {:?}; available tools: none matching. Do not retry it.",
-                call.name
-            ),
-            true,
-            "unknown_tool".to_owned(),
-        ),
+        None => {
+            let available = tools.names();
+            let listed = if available.is_empty() {
+                "none".to_owned()
+            } else {
+                available.join(", ")
+            };
+            (
+                format!(
+                    "Unknown tool {:?}; available tools: {listed}. Do not retry it.",
+                    call.name
+                ),
+                true,
+                "unknown_tool".to_owned(),
+            )
+        }
         Some(tool) => match tool.risk(&call.arguments) {
             Risk::Safe => run_tool(&tool, &call.arguments, context).await,
             Risk::NeedsApproval(kind) => {
@@ -295,7 +303,8 @@ async fn execute_call(
     core.audit().append(&AuditEntry {
         turn_id,
         tool: call.name.clone(),
-        input: normalize_input(&call.arguments),
+        // `null` stays `null`: the audit log skips null inputs.
+        input: call.arguments.clone(),
         decision: decision.map(|d| match d {
             Decision::Allow => "allow".to_owned(),
             Decision::Deny => "deny".to_owned(),
@@ -349,9 +358,4 @@ fn add_report(total: &mut Usage, report: &Usage) {
     total.input_tokens = merge(total.input_tokens, report.input_tokens);
     total.output_tokens = merge(total.output_tokens, report.output_tokens);
     total.total_tokens = merge(total.total_tokens, report.total_tokens);
-}
-
-/// Audit input: `null` stays `null` (the audit log skips it).
-fn normalize_input(input: &Value) -> Value {
-    input.clone()
 }

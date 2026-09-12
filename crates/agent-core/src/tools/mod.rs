@@ -76,7 +76,8 @@ pub trait Tool: Send + Sync {
     fn execute(&self, input: Value, ctx: ToolContext) -> ToolFuture;
 }
 
-/// Updated after a successful call, so the UI can show which tools ran.
+/// One-line, length-bounded preview of a tool call's input for the consent
+/// card.
 fn summarize_input(input: &Value) -> String {
     let text = serde_json::to_string(input).unwrap_or_default();
     if text.chars().count() <= 120 {
@@ -118,6 +119,11 @@ impl ToolRegistry {
             .iter()
             .find(|tool| tool.name() == name)
             .map(Arc::clone)
+    }
+
+    /// Registered tool names, for diagnostics the model can act on.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.tools.iter().map(|tool| tool.name()).collect()
     }
 
     /// The OpenAI `tools` array advertised on a request.
@@ -168,5 +174,6 @@ mod tests {
         assert!(schema["function"]["parameters"]["properties"]["text"].is_object());
         assert!(registry.get("echo").is_some());
         assert!(registry.get("missing").is_none());
+        assert_eq!(registry.names(), vec!["echo"]);
     }
 }

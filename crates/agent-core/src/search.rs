@@ -9,12 +9,17 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio_stream::StreamExt as _;
 
 use crate::config::{SearchConfig, SearchProviderKind};
 use crate::error::{ApiError, ApiErrorKind, Result};
 
 /// Hard cap on fetched page text fed to the summarizer (context hygiene).
 pub const MAX_PAGE_CHARS: usize = 20_000;
+
+/// Hard cap on how many bytes of a fetched page are read from the network at
+/// all; the tighter character cap applies later, after tag stripping.
+pub const MAX_FETCH_BYTES: usize = 256 * 1024;
 
 /// One search hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,11 +267,21 @@ pub async fn fetch_page_text(http: &reqwest::Client, url: &str) -> Result<String
             format!("fetching {url} returned HTTP {}", status.as_u16()),
         ));
     }
-    let html = response
-        .text()
-        .await
-        .map_err(|e| ApiError::new(ApiErrorKind::Network, format!("cannot read {url}: {e}")))?;
-    Ok(strip_html(&html))
+    // Read at most `MAX_FETCH_BYTES` off the wire instead of buffering the
+    // whole body: a hostile or enormous page cannot exhaust memory before the
+    // text cap applies.
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while body.len() < MAX_FETCH_BYTES {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+        let chunk = chunk
+            .map_err(|e| ApiError::new(ApiErrorKind::Network, format!("cannot read {url}: {e}")))?;
+        let take = chunk.len().min(MAX_FETCH_BYTES - body.len());
+        body.extend_from_slice(&chunk[..take]);
+    }
+    Ok(strip_html(&String::from_utf8_lossy(&body)))
 }
 
 async fn checked_json(response: reqwest::Response) -> Result<serde_json::Value> {

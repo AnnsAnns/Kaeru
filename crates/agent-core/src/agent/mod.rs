@@ -44,12 +44,14 @@ impl Emitter {
     }
 
     pub fn emit(&self, event: CoreEvent) {
-        {
-            let mut buffer = self.buffer.lock().expect("turn buffer poisoned");
-            buffer.push_back(event.clone());
-            while buffer.len() > TURN_BUFFER_CAPACITY {
-                buffer.pop_front();
-            }
+        // Hold the buffer lock across push and broadcast. `ChatSession
+        // ::subscribe` snapshots the buffer and subscribes under the same
+        // lock, so an event can never land in both replay and live (duplicate
+        // delta) or in neither (lost delta) for a reconnecting client.
+        let mut buffer = self.buffer.lock().expect("turn buffer poisoned");
+        buffer.push_back(event.clone());
+        while buffer.len() > TURN_BUFFER_CAPACITY {
+            buffer.pop_front();
         }
         let _ = self.events.send(event);
     }

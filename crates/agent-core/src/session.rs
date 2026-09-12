@@ -386,14 +386,14 @@ impl ChatSession {
         let inner = self.lock();
         match &inner.active {
             Some(active) => {
-                let replay = active
-                    .buffer
-                    .lock()
-                    .expect("turn buffer poisoned")
-                    .iter()
-                    .cloned()
-                    .collect();
-                EventStream::replay(replay, active.events.subscribe())
+                // Snapshot and subscribe while holding the buffer lock, so no
+                // event can slip between them: `Emitter::emit` pushes to the
+                // buffer and broadcasts in the same critical section.
+                let buffer = active.buffer.lock().expect("turn buffer poisoned");
+                let replay = buffer.iter().cloned().collect();
+                let live = active.events.subscribe();
+                drop(buffer);
+                EventStream::replay(replay, live)
             }
             None => EventStream::closed(),
         }

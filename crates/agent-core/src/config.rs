@@ -439,13 +439,12 @@ impl Config {
         match std::fs::read_to_string(path) {
             Ok(text) => Config::parse(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let config = Config::default();
-                config.save(path)?;
+                Config::write_default(path)?;
                 tracing::warn!(
                     config_path = %path.display(),
                     "no config found; wrote a default (edit [provider] or run --fake)"
                 );
-                Ok(config)
+                Ok(Config::default())
             }
             Err(e) => Err(ApiError::new(
                 ApiErrorKind::Config,
@@ -454,8 +453,14 @@ impl Config {
         }
     }
 
-    /// Write the config file (creating parent directories), 0600 on unix.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Write the documented default config file (creating parent
+    /// directories), 0600 on unix.
+    ///
+    /// This writes [`DEFAULT_CONFIG_TOML`], the commented first-boot template,
+    /// not the receiver: it is the missing-file branch of [`Config::load`]. Use
+    /// `toml::to_string` at the call site if an edited config must be
+    /// persisted instead.
+    pub fn write_default(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 ApiError::new(

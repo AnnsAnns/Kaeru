@@ -270,6 +270,9 @@ impl LlmClient for FakeProvider {
 pub struct RecordingClient {
     inner: Arc<dyn LlmClient>,
     path: PathBuf,
+    /// Serializes cassette load-modify-save cycles: overlapping turns used to
+    /// race, and only the last writer's interaction survived.
+    cassette: Arc<Mutex<()>>,
 }
 
 impl RecordingClient {
@@ -277,10 +280,17 @@ impl RecordingClient {
         Self {
             inner,
             path: path.into(),
+            cassette: Arc::new(Mutex::new(())),
         }
     }
 
-    fn append_interaction(path: &Path, request: ChatRequest, events: Vec<CoreEvent>) {
+    fn append_interaction(
+        path: &Path,
+        lock: &Mutex<()>,
+        request: ChatRequest,
+        events: Vec<CoreEvent>,
+    ) {
+        let _guard = lock.lock().expect("cassette lock poisoned");
         let mut cassette = Cassette::load(path).unwrap_or_else(|_| {
             let mut c = Cassette::new();
             c.recorded_at_unix = std::time::SystemTime::now()
@@ -295,16 +305,22 @@ impl RecordingClient {
         }
     }
 
-    fn record_models(path: &Path, models: &[ModelInfo], base_url: Option<&str>) {
+    /// Refresh the cassette's model list and base URL. A later `list_models`
+    /// call replaces a stale list, so provider model changes are picked up
+    /// instead of being frozen at the first recording.
+    fn record_models(path: &Path, lock: &Mutex<()>, models: &[ModelInfo], base_url: Option<&str>) {
+        let _guard = lock.lock().expect("cassette lock poisoned");
         let mut cassette = Cassette::load(path).unwrap_or_default();
-        if cassette.models.is_empty() {
-            cassette.models = models.to_vec();
-            if let Some(base_url) = base_url {
-                cassette.base_url = Some(base_url.to_owned());
-            }
-            if let Err(err) = cassette.save(path) {
-                tracing::warn!(target: "agent_core::llm", "cannot update cassette {}: {err}", path.display());
-            }
+        let base_url_changed = base_url.is_some() && cassette.base_url.as_deref() != base_url;
+        if cassette.models == models && !base_url_changed {
+            return;
+        }
+        cassette.models = models.to_vec();
+        if let Some(base_url) = base_url {
+            cassette.base_url = Some(base_url.to_owned());
+        }
+        if let Err(err) = cassette.save(path) {
+            tracing::warn!(target: "agent_core::llm", "cannot update cassette {}: {err}", path.display());
         }
     }
 }
@@ -313,6 +329,7 @@ impl LlmClient for RecordingClient {
     fn chat(&self, request: ChatRequest) -> ChatFuture {
         let inner = Arc::clone(&self.inner);
         let path = self.path.clone();
+        let lock = Arc::clone(&self.cassette);
         Box::pin(async move {
             let mut inner_rx = inner.chat(request.clone()).await?;
             let (tx, out_rx) = mpsc::channel(CLIENT_EVENT_CAPACITY);
@@ -325,7 +342,7 @@ impl LlmClient for RecordingClient {
                     }
                 }
                 if !recorded.is_empty() {
-                    RecordingClient::append_interaction(&path, request, recorded);
+                    RecordingClient::append_interaction(&path, &lock, request, recorded);
                 }
             });
             Ok(out_rx)
@@ -335,9 +352,10 @@ impl LlmClient for RecordingClient {
     fn list_models(&self) -> ModelsFuture {
         let path = self.path.clone();
         let inner = Arc::clone(&self.inner);
+        let lock = Arc::clone(&self.cassette);
         Box::pin(async move {
             let models = inner.list_models().await?;
-            RecordingClient::record_models(&path, &models, None);
+            RecordingClient::record_models(&path, &lock, &models, None);
             Ok(models)
         })
     }
@@ -465,6 +483,50 @@ mod tests {
         let replay = FakeProvider::from_cassette(cassette);
         let replayed = collect(replay.chat(request).await.unwrap()).await;
         assert_eq!(replayed, events);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_turns_all_reach_the_cassette() {
+        let path = temp_cassette_path("record-concurrent");
+        let inner: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
+        let recorder = Arc::new(RecordingClient::new(inner, &path));
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let recorder = Arc::clone(&recorder);
+            handles.push(tokio::spawn(async move {
+                let request = ChatRequest::new("m", vec![ChatMessage::user(format!("hi {i}"))]);
+                collect(recorder.chat(request).await.unwrap()).await;
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let cassette = Cassette::load(&path).unwrap();
+        assert_eq!(
+            cassette.interactions.len(),
+            8,
+            "a concurrent recording must not be lost to a write race"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn record_models_refreshes_a_stale_cassette() {
+        let path = temp_cassette_path("record-models-refresh");
+        let mut stale = Cassette::new();
+        stale.models = vec![ModelInfo::new("old/model")];
+        stale.save(&path).unwrap();
+
+        let inner: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
+        let recorder = RecordingClient::new(inner, &path);
+        let models = recorder.list_models().await.unwrap();
+
+        let reloaded = Cassette::load(&path).unwrap();
+        assert_eq!(reloaded.models, models, "the model list must be refreshed");
+        assert!(reloaded.models.iter().any(|m| m.id == "openai/gpt-4o-mini"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

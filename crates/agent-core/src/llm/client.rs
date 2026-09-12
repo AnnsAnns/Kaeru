@@ -28,6 +28,11 @@ use crate::llm::types::{
 /// Backpressure channel from the adapter to the session layer.
 pub const CLIENT_EVENT_CAPACITY: usize = 64;
 
+/// Ceiling on parallel tool calls accumulated from one response. `index` is
+/// provider-controlled, so a fabricated `usize::MAX` must not turn into an
+/// `index + 1` allocation; fragments at or above this bound are dropped.
+pub const MAX_TOOL_CALLS: usize = 64;
+
 pub type ChatFuture = Pin<Box<dyn Future<Output = Result<mpsc::Receiver<CoreEvent>>> + Send>>;
 pub type ModelsFuture = Pin<Box<dyn Future<Output = Result<Vec<ModelInfo>>> + Send>>;
 
@@ -192,6 +197,8 @@ async fn emit(tx: &mpsc::Sender<CoreEvent>, event: CoreEvent) -> bool {
 #[derive(Debug, Default)]
 struct ToolCallAccumulator {
     calls: Vec<PartialToolCall>,
+    /// Overflow is logged once per response, not once per hostile fragment.
+    warned_overflow: bool,
 }
 
 #[derive(Debug, Default)]
@@ -204,6 +211,16 @@ struct PartialToolCall {
 impl ToolCallAccumulator {
     fn push(&mut self, fragments: &[WireDeltaToolCall]) {
         for fragment in fragments {
+            if fragment.index >= MAX_TOOL_CALLS {
+                if !self.warned_overflow {
+                    self.warned_overflow = true;
+                    tracing::warn!(
+                        target: "agent_core::llm",
+                        "ignoring tool-call fragments with index >= {MAX_TOOL_CALLS}"
+                    );
+                }
+                continue;
+            }
             while self.calls.len() <= fragment.index {
                 self.calls.push(PartialToolCall::default());
             }
@@ -508,6 +525,22 @@ mod tests {
                 input: serde_json::json!({"query": "frogs"}),
             }]
         );
+    }
+
+    #[test]
+    fn absurd_tool_call_indexes_are_dropped_not_allocated() {
+        let mut usage = None;
+        let mut tool_calls = ToolCallAccumulator::default();
+        let payload = format!(
+            r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":{},"id":"call_x","function":{{"name":"web_search","arguments":"{{}}"}}}}]}}}}]}}"#,
+            usize::MAX
+        );
+        assert!(events_from_payload(&payload, &mut usage, &mut tool_calls).is_empty());
+        assert!(
+            tool_calls.calls.is_empty(),
+            "no slot may be allocated for an out-of-range index"
+        );
+        assert!(tool_calls.take_events().is_empty());
     }
 
     #[test]

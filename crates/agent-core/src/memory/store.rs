@@ -303,6 +303,8 @@ pub fn local_minutes_from_unix(unix: i64) -> u32 {
 fn local_tm(unix: i64) -> Option<(i32, i32, i32, i32, i32)> {
     use std::os::raw::{c_char, c_int, c_long};
 
+    // Assumes the glibc/musl `struct tm` layout. A different libc layout would
+    // have to revisit this FFI (the UTC fallback keeps the worst case sane).
     #[repr(C)]
     struct Tm {
         tm_sec: c_int,

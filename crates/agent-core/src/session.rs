@@ -486,6 +486,9 @@ pub struct ThreadSummary {
 /// lazily loaded from disk, so an in-flight turn stays reachable across HTTP
 /// requests. Storage stays the source of truth: a restart rebuilds every
 /// thread from `data/conversations/`.
+///
+/// Entries live for the process lifetime (no eviction); deliberate at personal
+/// scale — see arc42 §11 for the tradeoff and its revisit trigger.
 pub struct ConversationRegistry {
     core: Arc<AgentCore>,
     store: ConversationStore,
@@ -620,6 +623,10 @@ impl SessionInner {
     /// Write the conversation back to the store (when there is one). Never
     /// fails a turn: persistence errors are logged and the state stays in
     /// memory (quality goal: completed turns are not lost *by the store*).
+    ///
+    /// The store write is synchronous and runs under the session lock; at
+    /// personal scale (one small JSON file per finalized turn) that is
+    /// deliberate — see arc42 §11 for the tradeoff and its revisit trigger.
     fn persist(&self) {
         let Some(store) = &self.store else {
             return;

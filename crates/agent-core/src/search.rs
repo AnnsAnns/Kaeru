@@ -86,6 +86,13 @@ pub struct HttpSearch {
 
 impl HttpSearch {
     pub fn new(kind: SearchProviderKind, api_key: &str, base_url: &str) -> Result<Self> {
+        if kind == SearchProviderKind::Off {
+            // `from_config` never gets here; say what is actually wrong instead
+            // of the misleading "api_key must be set for this provider".
+            return Err(ApiError::config(
+                "web search is off; there is no provider to configure",
+            ));
+        }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
@@ -93,7 +100,7 @@ impl HttpSearch {
         let missing = match kind {
             SearchProviderKind::Brave | SearchProviderKind::Tavily => api_key.trim().is_empty(),
             SearchProviderKind::Searxng => base_url.trim().is_empty(),
-            SearchProviderKind::Off => true,
+            SearchProviderKind::Off => unreachable!("the off kind is handled above"),
         };
         if missing {
             let what = match kind {

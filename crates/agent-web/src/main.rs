@@ -129,7 +129,7 @@ fn main() {
                 config.search.max_results,
                 Some(memory.clone()),
             ))
-            .with_memory(memory.clone())
+            .with_memory(memory)
             .with_persona(cli.paths.persona.clone())
             .with_audit(AuditLog::new(cli.paths.audit.clone())),
         ),
@@ -146,12 +146,10 @@ fn main() {
     let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store.clone()));
 
     // M4.5: evening reflection over the same stores, plus its scheduler task.
-    let reflector = Arc::new(Reflector::new(
-        Arc::clone(&core),
-        memory,
-        store,
-        cli.paths.reflect_state.clone(),
-    ));
+    let reflector = Arc::new(
+        Reflector::from_core(Arc::clone(&core), store, cli.paths.reflect_state.clone())
+            .expect("the core always has a memory store here"),
+    );
     let state = AppState::new(core, registry, Some(Arc::clone(&reflector)));
 
     banner(&cli, &config, &state);

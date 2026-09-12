@@ -80,6 +80,27 @@ impl AgentCore {
     /// inject a `FakeProvider` while reporting `is_fake` truthfully). No tools
     /// are registered; call [`AgentCore::with_tools`] for the M3 set.
     pub fn with_mode(config: Config, client: Arc<dyn LlmClient>, mode: ClientMode) -> Self {
+        Self::assemble(config, client, mode, Arc::new(DisabledSearch))
+    }
+
+    /// Build the core with the client appropriate for `mode`. Wires the worker
+    /// registry and the configured search provider; tools and the audit log are
+    /// added by the frontend (they need runtime paths).
+    pub fn connect(config: Config, mode: ClientMode) -> Result<Self> {
+        let client =
+            llm::connect_client(&mode, &config.provider.base_url, &config.provider.api_key)?;
+        let search = search::from_config(&config.search);
+        Ok(Self::assemble(config, client, mode, search))
+    }
+
+    /// The one struct literal every constructor goes through; `search` is the
+    /// only field that differs between the live and test paths.
+    fn assemble(
+        config: Config,
+        client: Arc<dyn LlmClient>,
+        mode: ClientMode,
+        search: Arc<dyn SearchProvider>,
+    ) -> Self {
         let workers = Arc::new(Workers::from_config(
             Arc::clone(&client),
             &config.provider.model,
@@ -90,37 +111,12 @@ impl AgentCore {
             client,
             mode,
             tools: ToolRegistry::new(),
-            search: Arc::new(DisabledSearch),
-            workers,
-            audit: AuditLog::disabled(),
-            memory: None,
-            persona: None,
-        }
-    }
-
-    /// Build the core with the client appropriate for `mode`. Wires the worker
-    /// registry and the configured search provider; tools and the audit log are
-    /// added by the frontend (they need runtime paths).
-    pub fn connect(config: Config, mode: ClientMode) -> Result<Self> {
-        let client =
-            llm::connect_client(&mode, &config.provider.base_url, &config.provider.api_key)?;
-        let search = search::from_config(&config.search);
-        let workers = Arc::new(Workers::from_config(
-            Arc::clone(&client),
-            &config.provider.model,
-            &config.workers,
-        ));
-        Ok(Self {
-            config,
-            client,
-            mode,
-            tools: ToolRegistry::new(),
             search,
             workers,
             audit: AuditLog::disabled(),
             memory: None,
             persona: None,
-        })
+        }
     }
 
     pub fn config(&self) -> &Config {

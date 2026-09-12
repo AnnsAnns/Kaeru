@@ -669,15 +669,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kaeru-web-reflect-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
-        let core = Arc::new(AgentCore::new(config, Arc::new(FakeProvider::builtin())));
+        let core = Arc::new(
+            AgentCore::new(config, Arc::new(FakeProvider::builtin()))
+                .with_memory(agent_core::MemoryStore::new(dir.join("memory"))),
+        );
         let store = agent_core::ConversationStore::new(dir.join("conversations"));
         let registry = Arc::new(ConversationRegistry::new(Arc::clone(&core), store.clone()));
-        let reflector = Arc::new(Reflector::new(
-            Arc::clone(&core),
-            agent_core::MemoryStore::new(dir.join("memory")),
-            store,
-            dir.join("reflect-state.json"),
-        ));
+        let reflector = Arc::new(
+            Reflector::from_core(Arc::clone(&core), store, dir.join("reflect-state.json")).unwrap(),
+        );
         let state = AppState::new(core, registry, Some(reflector));
 
         let response = request(

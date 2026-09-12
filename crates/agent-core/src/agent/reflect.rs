@@ -119,9 +119,23 @@ pub struct Reflector {
 }
 
 impl Reflector {
-    /// Build the reflector from the core's `[reflect]` config. The digest is a
-    /// no-op unless `config.reflect.enabled` is set.
-    pub fn new(
+    /// Build the reflector over the stores the core already owns: the memory
+    /// store is taken from the core, so the digest and the agent always share
+    /// one instance. Fails when no memory store is configured (reflection has
+    /// nowhere to write). The digest is a no-op unless `config.reflect.enabled`
+    /// is set.
+    pub fn from_core(
+        core: Arc<AgentCore>,
+        conversations: ConversationStore,
+        state_path: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let memory = core.memory().cloned().ok_or_else(|| {
+            ApiError::config("evening reflection requires a memory store on the core")
+        })?;
+        Ok(Self::new(core, memory, conversations, state_path))
+    }
+
+    fn new(
         core: Arc<AgentCore>,
         memory: MemoryStore,
         conversations: ConversationStore,
@@ -764,19 +778,17 @@ mod tests {
         dir: &Path,
         conversations: ConversationStore,
     ) -> Reflector {
-        let core = Arc::new(AgentCore::with_mode(
-            config,
-            client,
-            crate::llm::ClientMode::Fake {
-                cassette: PathBuf::new(),
-            },
-        ));
-        Reflector::new(
-            core,
-            MemoryStore::new(dir.join("memory")),
-            conversations,
-            dir.join("reflect-state.json"),
-        )
+        let core = Arc::new(
+            AgentCore::with_mode(
+                config,
+                client,
+                crate::llm::ClientMode::Fake {
+                    cassette: PathBuf::new(),
+                },
+            )
+            .with_memory(MemoryStore::new(dir.join("memory"))),
+        );
+        Reflector::from_core(core, conversations, dir.join("reflect-state.json")).unwrap()
     }
 
     #[test]
@@ -991,14 +1003,11 @@ mod tests {
                     cassette: PathBuf::new(),
                 },
             )
-            .with_persona(persona_path.clone()),
+            .with_persona(persona_path.clone())
+            .with_memory(MemoryStore::new(dir.join("memory"))),
         );
-        let reflector = Reflector::new(
-            core,
-            MemoryStore::new(dir.join("memory")),
-            conversations,
-            dir.join("reflect-state.json"),
-        );
+        let reflector =
+            Reflector::from_core(core, conversations, dir.join("reflect-state.json")).unwrap();
 
         let outcome = reflector.run_now(2_000_000_000).await.unwrap();
         assert!(outcome.persona_changed);
@@ -1071,14 +1080,11 @@ mod tests {
                     cassette: PathBuf::new(),
                 },
             )
-            .with_persona(persona_path.clone()),
+            .with_persona(persona_path.clone())
+            .with_memory(MemoryStore::new(dir.join("memory"))),
         );
-        let reflector = Reflector::new(
-            core,
-            MemoryStore::new(dir.join("memory")),
-            conversations,
-            dir.join("reflect-state.json"),
-        );
+        let reflector =
+            Reflector::from_core(core, conversations, dir.join("reflect-state.json")).unwrap();
 
         let outcome = reflector.run_now(2_000_000_000).await.unwrap();
         assert!(!outcome.persona_changed);
@@ -1148,14 +1154,11 @@ mod tests {
                     cassette: PathBuf::new(),
                 },
             )
-            .with_persona(persona_path.clone()),
+            .with_persona(persona_path.clone())
+            .with_memory(MemoryStore::new(dir.join("memory"))),
         );
-        let reflector = Reflector::new(
-            core,
-            MemoryStore::new(dir.join("memory")),
-            conversations,
-            dir.join("reflect-state.json"),
-        );
+        let reflector =
+            Reflector::from_core(core, conversations, dir.join("reflect-state.json")).unwrap();
 
         let outcome = reflector.run_now(2_000_000_000).await.unwrap();
         assert!(!outcome.persona_changed);

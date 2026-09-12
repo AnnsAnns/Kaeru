@@ -48,6 +48,9 @@ impl MemoryStore {
     }
 
     /// Persist one markdown note for today; returns the written path.
+    ///
+    /// Atomic like the other data stores: write `.tmp`, then rename over the
+    /// final name, so a crash mid-write never leaves a half-written note.
     pub fn write(&self, content: &str, tags: &[String]) -> Result<PathBuf> {
         let dir = self.day_dir();
         std::fs::create_dir_all(&dir).map_err(|e| {
@@ -60,9 +63,12 @@ impl MemoryStore {
             local_date(),
             content.trim()
         );
-        std::fs::write(&path, document).map_err(|e| {
-            ApiError::internal(format!("cannot write memory {}: {e}", path.display()))
+        let tmp = path.with_extension("md.tmp");
+        std::fs::write(&tmp, document).map_err(|e| {
+            ApiError::internal(format!("cannot write memory {}: {e}", tmp.display()))
         })?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| ApiError::internal(format!("cannot finalize {}: {e}", path.display())))?;
         Ok(path)
     }
 
@@ -416,6 +422,23 @@ mod tests {
         assert_eq!(first.tags, vec!["alpha".to_string()]);
         assert_eq!(first.day, local_date());
         assert!(first.created.is_some());
+        std::fs::remove_dir_all(store.dir()).ok();
+    }
+
+    #[test]
+    fn write_is_atomic_and_leaves_no_tmp_files() {
+        let store = temp_store("atomic");
+        let path = store.write("atomic note", &[]).unwrap();
+        assert!(path.is_file());
+        let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "only the final note remains: {names:?}");
+        assert!(
+            names.iter().all(|name| !name.ends_with(".tmp")),
+            "no temp file may survive: {names:?}"
+        );
         std::fs::remove_dir_all(store.dir()).ok();
     }
 

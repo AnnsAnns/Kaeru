@@ -389,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_search_returns_matches_and_is_safe() {
-        let store = temp_store("search");
+        let store = temp_store("tool-search");
         store
             .write("frogs live in ponds", &["animals".into()])
             .unwrap();

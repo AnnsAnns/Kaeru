@@ -26,6 +26,10 @@ relative to the **current working directory** (not the binary), and the fake
 provider paints a delay so streaming is visible. Run from the repo root so
 `data/` lands where you expect.
 
+M5 host requirement: the Python sandbox needs Linux, unprivileged user
+namespaces, and `bwrap` + `uv` on `PATH`. `agent-web` checks this at startup and
+exits (fail closed) with install instructions when it is missing.
+
 CI (`.github/workflows/ci.yml`) runs fmt check, clippy `-D warnings`,
 `cargo test -p agent-core`, `cargo test`, then a release build. Match that
 locally before finishing. Toolchain is Rust **edition 2024**.
@@ -33,9 +37,9 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 ## Layout
 
 ```
-crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools, search, audit, memory
-crates/agent-web/      axum binary: main.rs (CLI), routes.rs, bridge.rs, error.rs, assets.rs, markdown.rs, assets/ (embedded UI)
-data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json
+crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python), sandbox (envprep/exec/limits/workspace), search, audit, memory
+crates/agent-web/      axum binary: main.rs (CLI), routes.rs, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
+data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + sandbox/{workspace,envs}
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
 ```
@@ -47,7 +51,8 @@ Bort/                  owner's blog — design reference ONLY (see below)
   must compile and pass `cargo test -p agent-core` with no frontend present.
 - **C15 — boring stack:** new dependencies require an ADR in the arc42 doc.
   The current set is small and deliberate (axum, tokio, reqwest, serde, toml,
-  rust-embed, tokio-stream, tracing, pulldown-cmark).
+  rust-embed, tokio-stream, tracing, pulldown-cmark, libc for rlimits; bwrap
+  and uv are host tools, not crates).
 - **ADR-005 — protocol isolation:** all OpenAI-compatible wire knowledge lives
   in `crates/agent-core/src/llm/`. Nothing else may depend on provider shapes.
 - **C17 — Bort is reference-only:** `Bort/` is a nested git repo (the owner's
@@ -71,17 +76,19 @@ The roadmap is staged; variants and stubs exist on purpose. Do not implement
 later-milestone features opportunistically, and don't "clean up" intentional
 stubs. Examples:
 
-- `CoreEvent` is the full enum from day one; M3 uses `Delta`/`Reasoning`/
-  `ToolCall`/`ToolResult`/`ApprovalRequest`/`TurnDone`/`Error`; `Artifact`
-  arrives with M5 files. Don't add protocol fields "now that we're here" —
-  stage them.
+- `CoreEvent` is the full enum from day one; M3 added `Delta`/`Reasoning`/
+  `ToolCall`/`ToolResult`/`ApprovalRequest`/`TurnDone`/`Error`, and M5 now uses
+  `Artifact`. Don't add protocol fields "now that we're here" — stage them.
 - **M3** added the bounded tool loop, `web_search`, the tool-free summarizer
   worker, the audit log, consent middleware and the disconnect-surviving turn
   executor. **M4** added the memory read side, budgeted injection, the browser
   and the distiller worker. **M4.5** added the persona file (read fresh per turn
   as the system prompt) and config-scheduled evening reflection into
-  `reflect`-tagged memory via the tool-free reflector worker. The Python sandbox
-  and file flow are **M5** — do not build them early.
+  `reflect`-tagged memory via the tool-free reflector worker. **M5** added the
+  two-phase Python sandbox (`uv` env-prep + `bubblewrap` execution), the
+  consent-gated `python` tool with artifact events, and the authenticated
+  workspace file flow. **M6** (Discord frontend / daemon split) is next — do
+  not build it early.
 - **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
 When you complete milestone work, update the matching `docs/milestones/Mx.md`
@@ -133,6 +140,34 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   trailing user message is popped so retry doesn't duplicate it. Failure
   *after* partial output keeps everything (retry then duplicates the user
   message — accepted edge).
+- **M5 sandbox:** `sandbox/exec.rs` builds one `bwrap` command line
+  (`--unshare-all --new-session --die-with-parent --clearenv`, ro system
+  trees, env at `/opt/env` ro, workspace rw at `/workspace`, `--remount-ro /`
+  **after** the tmpfs mounts, then `--setenv`s and `python -`). The script
+  goes over stdin, so nothing is written on its behalf; artifacts come from a
+  before/after workspace snapshot diff (`Sandbox::snapshot`, hidden names and
+  `__pycache__` skipped). `RLIMIT_NPROC` is per-user on Linux and must be
+  computed at run time as the user's thread count + a margin (a fixed cap
+  breaks userns creation on a busy desktop); timeouts kill via
+  `kill_on_drop` + `start_kill`, and captured streams keep draining past the
+  64 KiB cap so the child can't block on a full pipe.
+- **M5 consent order:** `PythonTool::risk()` checks `network` first (one
+  `NetworkAccess` card that names any install), then unprepared deps
+  (`PackageInstall`), else `Safe`. Prepared envs are `envs/{FNV1a(sorted
+  deps)}/` with a `.complete` marker written only after a successful install;
+  preparation goes to a hidden tmp dir + atomic rename under an in-process
+  mutex. Never gate a cached dep set on consent again.
+- **M5 file flow:** `agent-web/src/files.rs` uploads the raw body to
+  `?name=` (single component, no hidden names) and serves
+  `GET /api/files/{*path}` through `agent_core::sandbox::workspace` — no
+  `.`/`..` components, canonical containment check → 403 on traversal or
+  symlink escape. Only raster images are `inline`; SVG/HTML download as
+  attachments with `nosniff`. The UI must fetch with `X-Auth-Token` and use
+  blob URLs (an `<img>` tag cannot carry the header).
+- **M5 host check:** `Sandbox::check_host` (bwrap/uv + a real probe run) is
+  called by `main.rs` before anything binds; missing tools exit 1 with
+  instructions. Tests that need bwrap call `check_host` and skip with a note
+  when the host cannot sandbox (CI without bwrap stays green).
 - **Context budget** (`context.rs`, ADR-018) is deterministic (~4 chars/token)
   and runs *before* the provider call: drop-oldest window + rolling summary.
   The last message is always kept even when it alone exceeds the budget, and
@@ -191,12 +226,21 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   loosening timings.
 - The `--fake`/test cassette format is versioned (`CASSETTE_VERSION`); fixtures
   are dated and schema-versioned, re-record on adapter changes.
+- Sandbox integration tests run real `bwrap` + the system Python and **skip
+  with a note** when `Sandbox::check_host` fails (no bwrap on the host/CI).
+  They never install packages: `envprep` tests simulate a completed env
+  (`.complete` + `bin/python`) to prove reuse without touching PyPI.
+- The mock provider takes `MOCK_TOOL=python` / `python-deps` for manual M5
+  end-to-end runs (upload → script → artifact/consent).
 
 ## Runtime data
 
 `data/` holds everything mutable and is the complete backup: `config.toml`
 (written 0600, holds the provider key and auth token — never sent to the
-browser) and `conversations/{id}.json` (atomic tmp+rename writes; unreadable or
-unknown-schema files are **quarantined** aside rather than crashing a turn).
-The deployment guide (`docs/deployment.md`) covers systemd + cloudflared +
-Cloudflare Access; `WorkingDirectory=` is what places `data/` correctly there.
+browser), `conversations/{id}.json` (atomic tmp+rename writes; unreadable or
+unknown-schema files are **quarantined** aside rather than crashing a turn),
+and `sandbox/workspace/` (uploads + script outputs; user data).
+`sandbox/envs/` is disposable — rebuildable from the dep sets — so backups
+may skip it. The deployment guide (`docs/deployment.md`) covers systemd +
+cloudflared + Cloudflare Access; `WorkingDirectory=` is what places `data/`
+correctly there.

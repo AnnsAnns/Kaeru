@@ -25,6 +25,7 @@ pub fn api_error(err: &ApiError) -> Response {
         ApiErrorKind::Unauthorized => StatusCode::BAD_GATEWAY,
         ApiErrorKind::RateLimited => StatusCode::BAD_GATEWAY,
         ApiErrorKind::NotFound => StatusCode::BAD_GATEWAY,
+        ApiErrorKind::Forbidden => StatusCode::FORBIDDEN,
         ApiErrorKind::Network => StatusCode::BAD_GATEWAY,
         ApiErrorKind::Protocol => StatusCode::BAD_GATEWAY,
         ApiErrorKind::Provider => StatusCode::BAD_GATEWAY,

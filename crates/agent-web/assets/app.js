@@ -29,6 +29,9 @@
   const memoryEmptyEl = $("memory-empty");
   const reflectBtn = $("reflect-btn");
   const reflectStatusEl = $("reflect-status");
+  const attachBtn = $("attach-btn");
+  const fileInput = $("file-input");
+  const attachmentsEl = $("attachments");
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -56,7 +59,17 @@
     usage: { in: 0, out: 0 },
     threadId: null,
     threads: [],
+    // Workspace files uploaded for the next message (M5).
+    attachments: [],
   };
+
+  // Blob URLs created for workspace files (images/downloads); revoked when the
+  // thread view is replaced so they do not pile up.
+  const objectUrls = [];
+  function releaseObjectUrls() {
+    for (const url of objectUrls) URL.revokeObjectURL(url);
+    objectUrls.length = 0;
+  }
 
   /* ---------- theme (Bort switcher port: cycle + localStorage) ---------- */
 
@@ -334,6 +347,7 @@
     syncEffortSelect();
 
     messagesEl.replaceChildren();
+    releaseObjectUrls();
     emptyHint = null;
     if (payload.summary) {
       const box = addBox("kaeru", "kaeru · summary");
@@ -547,9 +561,18 @@
   }
 
   async function sendMessage(text) {
-    const message = text.trim();
-    if (!message || state.streaming) return;
+    const typed = text.trim();
+    if (!typed || state.streaming) return;
     if (!state.threadId) await createThread();
+
+    // Uploaded workspace files ride along with the message as a plain note,
+    // so the model knows they exist (and that they live in the workspace).
+    const attached = state.attachments.slice();
+    const message = attached.length
+      ? `${typed}\n\n[attached in the workspace: ${attached.join(", ")}]`
+      : typed;
+    state.attachments = [];
+    renderAttachments();
 
     composerEl.value = "";
     autosize();
@@ -700,6 +723,108 @@
     scrollToBottom();
   }
 
+  /* ---------- workspace files (M5) ---------- */
+
+  /* Fetch a workspace file with the auth header and expose it as a blob URL;
+     an <img>/<a> tag cannot carry a custom header, so this indirection is
+     what keeps file serving authenticated (ADR-017). */
+  async function fileObjectUrl(path) {
+    const encoded = path.split("/").map(encodeURIComponent).join("/");
+    const response = await apiFetch(`/api/files/${encoded}`);
+    if (!response.ok) throw await readApiError(response);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    objectUrls.push(url);
+    return url;
+  }
+
+  async function downloadArtifact(path) {
+    try {
+      const url = await fileObjectUrl(path);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = path.split("/").pop() || "file";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      reportError(err);
+    }
+  }
+
+  /* Artifact events (M5): images render inline, everything else becomes a
+     download card. */
+  function addArtifactCard(turn, event) {
+    const card = document.createElement("div");
+    card.className = "artifact";
+    const name = document.createElement("span");
+    name.className = "artifact-name";
+    name.textContent = `📎 ${event.path}`;
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "artifact-download";
+    download.textContent = "download";
+    download.addEventListener("click", () => downloadArtifact(event.path));
+    card.append(name, download);
+    if ((event.mime_hint || "").startsWith("image/")) {
+      const image = document.createElement("img");
+      image.className = "artifact-image";
+      image.alt = event.path;
+      image.loading = "lazy";
+      fileObjectUrl(event.path)
+        .then((url) => {
+          image.src = url;
+        })
+        .catch(() => {
+          /* the card remains downloadable */
+        });
+      card.append(image);
+    }
+    turn.steps.append(card);
+    scrollToBottom();
+  }
+
+  function uploadFile(file) {
+    if (!file) return;
+    apiFetch(`/api/files?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "content-type": file.type || "application/octet-stream" },
+      body: file,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw await readApiError(response);
+        const body = await response.json();
+        state.attachments.push(body.path);
+        renderAttachments();
+      })
+      .catch(reportError)
+      .finally(() => {
+        fileInput.value = "";
+      });
+  }
+
+  function renderAttachments() {
+    attachmentsEl.replaceChildren();
+    attachmentsEl.hidden = state.attachments.length === 0;
+    for (const path of state.attachments) {
+      const chip = document.createElement("span");
+      chip.className = "attachment-chip";
+      const label = document.createElement("span");
+      label.textContent = `📎 ${path}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "attachment-remove";
+      remove.title = "Remove";
+      remove.textContent = "✕";
+      remove.addEventListener("click", () => {
+        state.attachments = state.attachments.filter((kept) => kept !== path);
+        renderAttachments();
+      });
+      chip.append(label, remove);
+      attachmentsEl.append(chip);
+    }
+  }
+
   function handleEvent(event, turn) {
     switch (event.type) {
       case "delta":
@@ -735,6 +860,9 @@
       }
       case "approval_request":
         addApprovalCard(turn, event);
+        break;
+      case "artifact":
+        addArtifactCard(turn, event);
         break;
       case "turn_done":
         turn.terminal = true;
@@ -796,6 +924,8 @@
   });
   sendBtn.addEventListener("click", () => sendMessage(composerEl.value));
   stopBtn.addEventListener("click", stop);
+  attachBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => uploadFile(fileInput.files[0]));
   regenBtn.addEventListener("click", () => {
     regenerate().catch(reportError);
   });

@@ -21,6 +21,9 @@ pub enum ApiErrorKind {
     RateLimited,
     /// Provider returned HTTP 404 (e.g. unknown model).
     NotFound,
+    /// Access to a local resource was refused (path traversal, symlink
+    /// escape in the file flow; M5).
+    Forbidden,
     /// Connection / transport level failure.
     Network,
     /// Provider response violated the OpenAI-compatible protocol.
@@ -42,6 +45,7 @@ impl ApiErrorKind {
             Self::Unauthorized => "unauthorized",
             Self::RateLimited => "rate_limited",
             Self::NotFound => "not_found",
+            Self::Forbidden => "forbidden",
             Self::Network => "network",
             Self::Protocol => "protocol",
             Self::Provider => "provider",

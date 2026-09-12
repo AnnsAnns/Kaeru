@@ -14,7 +14,7 @@ use crate::context;
 use crate::events::{ApprovalSink, CoreEvent, Decision, Risk, Usage};
 use crate::llm::{ChatMessage, ChatRequest, ToolCall};
 use crate::tools::ToolRegistry;
-use crate::tools::{Tool, ToolContext};
+use crate::tools::{ArtifactSink, Tool, ToolContext};
 
 use super::Emitter;
 use super::fence;
@@ -197,7 +197,7 @@ pub async fn run(input: TurnInput) -> LoopResult {
         messages.push(assistant.clone());
         new_messages.push(assistant);
 
-        let context = core.tool_context(turn_id);
+        let context = core.tool_context(turn_id, Some(artifact_sink(&emitter)));
         for call in step_calls {
             if cancelled.load(Ordering::SeqCst) {
                 return LoopResult {
@@ -235,6 +235,18 @@ pub async fn run(input: TurnInput) -> LoopResult {
         new_messages,
         usage: usage_of(&total_usage, saw_usage),
     }
+}
+
+/// Wire a tool's artifact output (M5) to the turn's event stream, so every
+/// frontend renders workspace files the same way.
+fn artifact_sink(emitter: &Emitter) -> ArtifactSink {
+    let emitter = emitter.clone();
+    ArtifactSink::new(move |path, mime_hint| {
+        emitter.emit(CoreEvent::Artifact {
+            path: path.to_owned(),
+            mime_hint: mime_hint.map(str::to_owned),
+        });
+    })
 }
 
 /// Execute one requested tool call: consent, run, emit, audit, fence.

@@ -204,6 +204,7 @@ mod tests {
             workers: Arc::new(workers),
             audit: AuditLog::disabled(),
             turn_id: 1,
+            artifacts: None,
         }
     }
 

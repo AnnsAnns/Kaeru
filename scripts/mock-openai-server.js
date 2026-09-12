@@ -4,6 +4,119 @@ const http = require("http");
 
 const KEY = "mock-key";
 const MODEL = "mock-model";
+// MOCK_TOOL=python scripts a sandboxed Python call (M5 manual verification);
+// the default scripts the M3 web_search call.
+const TOOL = process.env.MOCK_TOOL || "web_search";
+
+// Pure-stdlib "plot": reads the uploaded CSV from the workspace and writes a
+// tiny bar image, so the full upload -> script -> artifact -> download path is
+// exercised without installing matplotlib.
+const PYTHON_SCRIPT = `import csv, struct, zlib
+
+with open("data.csv", newline="") as f:
+    rows = list(csv.DictReader(f))
+total = sum(float(row["amount"]) for row in rows)
+
+def chunk(tag, data):
+    return (struct.pack(">I", len(data)) + tag + data +
+            struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+w = h = 8
+bar = max(1, min(h, int(total)))
+raw = b"".join(b"\\x00" + bytes([200, 80, 40, 255]) * w for _ in range(bar))
+raw += b"".join(b"\\x00" + bytes([30, 30, 60, 255]) * w for _ in range(h - bar))
+png = (b"\\x89PNG\\r\\n\\x1a\\n"
+       + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+       + chunk(b"IDAT", zlib.compress(raw))
+       + chunk(b"IEND", b""))
+open("total.png", "wb").write(png)
+print(f"cleaned {len(rows)} rows; total={total}")
+`;
+
+function toolCallChunks() {
+  if (TOOL === "python-deps") {
+    const script = 'import cowsay\nprint(cowsay.get_output_string("cow", "kaeru"))\n';
+    return [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_mock_1",
+              type: "function",
+              function: { name: "python", arguments: "" },
+            },
+          ],
+        },
+      },
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              function: {
+                arguments: JSON.stringify({ script, deps: ["cowsay"] }),
+              },
+            },
+          ],
+        },
+      },
+      { delta: {}, finish_reason: "tool_calls" },
+    ];
+  }
+  if (TOOL === "python") {
+    return [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_mock_1",
+              type: "function",
+              function: { name: "python", arguments: "" },
+            },
+          ],
+        },
+      },
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              function: { arguments: JSON.stringify({ script: PYTHON_SCRIPT }) },
+            },
+          ],
+        },
+      },
+      { delta: {}, finish_reason: "tool_calls" },
+    ];
+  }
+  return [
+    {
+      delta: {
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_mock_1",
+            type: "function",
+            function: { name: "web_search", arguments: "" },
+          },
+        ],
+      },
+    },
+    {
+      delta: {
+        tool_calls: [
+          {
+            index: 0,
+            function: { arguments: '{"query":"kaeru frog agent"}' },
+          },
+        ],
+      },
+    },
+    { delta: {}, finish_reason: "tool_calls" },
+  ];
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -42,35 +155,11 @@ const server = http.createServer((req, res) => {
         "cache-control": "no-cache",
       });
 
-      // Exercise the M3 agent loop: the first turn asks for web_search, the
-      // turn after the tool result answers in plain text.
+      // Exercise the agent loop: the first turn asks for a tool (web_search,
+      // or the sandboxed python script with MOCK_TOOL=python), the turn after
+      // the tool result answers in plain text.
       const chunks = hasTools && !sawToolResult
-        ? [
-            { delta: { role: "assistant" } },
-            {
-              delta: {
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: "call_mock_1",
-                    type: "function",
-                    function: { name: "web_search", arguments: "" },
-                  },
-                ],
-              },
-            },
-            {
-              delta: {
-                tool_calls: [
-                  {
-                    index: 0,
-                    function: { arguments: '{"query":"kaeru frog agent"}' },
-                  },
-                ],
-              },
-            },
-            { delta: {}, finish_reason: "tool_calls" },
-          ]
+        ? [{ delta: { role: "assistant" } }, ...toolCallChunks()]
         : [
             { delta: { role: "assistant" } },
             { delta: { content: "Hello" } },

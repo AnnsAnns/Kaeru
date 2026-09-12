@@ -7,12 +7,21 @@ LM Studio, vLLM, llama.cpp) with token-by-token streaming.
 
 The plan and architecture live in [`docs/arc42-architecture.md`](docs/arc42-architecture.md);
 implementation notes per milestone in [`docs/milestones/`](docs/milestones/).
-Status: **M3 (agent loop + web search) code complete** — see
-[`docs/milestones/M3.md`](docs/milestones/M3.md). Earlier notes:
+Status: **M5 (sandboxed Python + file flow) code complete** — see
+[`docs/milestones/M5.md`](docs/milestones/M5.md). Earlier notes:
+[`docs/milestones/M4.5.md`](docs/milestones/M4.5.md),
+[`docs/milestones/M4.md`](docs/milestones/M4.md),
+[`docs/milestones/M3.md`](docs/milestones/M3.md),
 [`docs/milestones/M2.5.md`](docs/milestones/M2.5.md),
 [`docs/milestones/M2.md`](docs/milestones/M2.md),
-[`docs/milestones/M1.md`](docs/milestones/M1.md). Next up is **M4 — memory**
-(planned in [`docs/arc42-architecture.md`](docs/arc42-architecture.md) §1.3).
+[`docs/milestones/M1.md`](docs/milestones/M1.md). Next up is **M6 — the Discord
+frontend / daemon split** (planned in [`docs/arc42-architecture.md`](docs/arc42-architecture.md) §1.3).
+
+> M5 host requirement: the Python sandbox needs **Linux** with unprivileged
+> user namespaces and `bwrap` (bubblewrap) + `uv` on `PATH`
+> (`pacman -S bubblewrap uv` / `apt install bubblewrap uv` /
+> `dnf install bubblewrap uv`). The server checks this at startup and refuses
+> to boot without them.
 
 ## Quickstart
 
@@ -41,6 +50,15 @@ base_url = ""              # searxng, e.g. http://127.0.0.1:8888
 
 [workers.summarizer]       # tool-free model that distills fetched pages (M3/ADR-021)
 model = ""                 # empty = provider default
+
+[sandbox]                  # Python tool + workspace files (M5)
+workspace = "data/sandbox/workspace"   # the one writable folder
+read_paths = []                        # extra read-only dirs for scripts
+timeout_secs = 60
+memory_mb = 512
+
+[files]
+max_upload_mb = 50         # upload cap for POST /api/files
 ```
 
 ```sh
@@ -87,6 +105,16 @@ runs them and feeds the results back until it answers.
 - **`memory_write`** always asks for consent first (one tap in the UI): memory
   persists across sessions, so a silent write would be a prompt-injection vector
   (ADR-016).
+- **`python`** (M5) runs a script in a **bubblewrap sandbox**: offline, with the
+  workspace as its only writable path, and resource limits (wall clock, CPU,
+  memory, file size, output). Scripts with no dependencies run immediately;
+  requesting packages asks for a one-time `PackageInstall` consent (prepared
+  dep sets are cached and never ask again), and a script that needs the network
+  needs an explicit `NetworkAccess` consent. Files the script writes appear in
+  the chat as artifacts — images inline, everything downloadable.
+- **Workspace files** (M5): the 📎 button uploads into `data/sandbox/workspace`
+  (the same folder scripts work in), and `GET /api/files/…` serves them
+  authenticated with sanitized paths (no traversal, no symlink escape).
 
 Tool outputs are **fenced as untrusted data** before the model sees them, every
 tool execution and consent decision is appended to `data/audit.jsonl`, and the
@@ -108,9 +136,9 @@ it (§6.3a). The **↻** button regenerates the last answer.
 ## Layout
 
 ```
-crates/agent-core/   library: config, events, LLM client (SSE), fake provider, conversations, context, ChatSession, ConversationRegistry, agent loop, tools, search, workers, audit
-crates/agent-web/    axum frontend: routes, SSE bridge, markdown renderer, embedded UI (rust-embed)
-data/                created at runtime: config.toml, cassette.json, conversations/, audit.jsonl, memory/ (M4+ sandbox/)
+crates/agent-core/   library: config, events, LLM client (SSE), fake provider, conversations, context, ChatSession, ConversationRegistry, agent loop, tools (web_search/memory/python), sandbox supervisor (uv + bubblewrap), search, workers, memory, audit
+crates/agent-web/    axum frontend: routes, SSE bridge, markdown renderer, file flow, embedded UI (rust-embed)
+data/                created at runtime: config.toml, cassette.json, conversations/, audit.jsonl, memory/, persona.md, sandbox/{workspace,envs}/
 Bort/                the owner's blog, visual design reference ONLY — never built or imported
 scripts/             dev tooling (mock provider server for local end-to-end runs)
 ```
@@ -122,6 +150,7 @@ cargo test                       # full offline suite (fake provider, no network
 cargo test -p agent-core         # core tests without compiling any frontend
 cargo fmt && cargo clippy --all-targets -- -D warnings
 node scripts/mock-openai-server.js   # + `--record` for a local end-to-end run
+MOCK_TOOL=python node scripts/mock-openai-server.js   # scripts a sandbox run (M5)
 ```
 
 ## License

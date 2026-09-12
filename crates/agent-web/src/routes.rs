@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use agent_core::{AgentCore, ChatSession, ConversationRegistry, Reflector};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -21,7 +21,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{assets, bridge, error};
+use crate::{assets, bridge, error, files};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,6 +29,8 @@ pub struct AppState {
     pub registry: Arc<ConversationRegistry>,
     /// Evening-reflection job (M4.5); `None` when the frontend did not wire one.
     pub reflector: Option<Arc<Reflector>>,
+    /// Workspace file flow (M5); `None` when the frontend did not wire one.
+    pub files: Option<files::Files>,
 }
 
 impl AppState {
@@ -36,11 +38,13 @@ impl AppState {
         core: Arc<AgentCore>,
         registry: Arc<ConversationRegistry>,
         reflector: Option<Arc<Reflector>>,
+        files: Option<files::Files>,
     ) -> Self {
         Self {
             core,
             registry,
             reflector,
+            files,
         }
     }
 
@@ -69,17 +73,30 @@ impl AppState {
         ));
         let registry = Arc::new(ConversationRegistry::new(
             Arc::clone(&core),
-            agent_core::ConversationStore::new(dir),
+            agent_core::ConversationStore::new(dir.clone()),
         ));
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
         Self {
             core,
             registry,
             reflector: None,
+            files: Some(files::Files {
+                workspace,
+                max_upload_bytes: 1024 * 1024,
+            }),
         }
     }
 }
 
 pub fn router(state: AppState) -> Router {
+    // The upload body limit is per-route; everything else keeps axum's small
+    // JSON default.
+    let upload_limit = state
+        .files
+        .as_ref()
+        .map(|files| files.max_upload_bytes)
+        .unwrap_or(2 * 1024 * 1024);
     let api = Router::new()
         .route("/session", get(get_session))
         .route("/models", get(get_models))
@@ -92,6 +109,11 @@ pub fn router(state: AppState) -> Router {
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route("/memory", get(list_memory))
         .route("/reflect", post(post_reflect))
+        .route(
+            "/files",
+            post(files::upload).layer(DefaultBodyLimit::max(upload_limit.max(1))),
+        )
+        .route("/files/{*path}", get(files::serve))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -682,7 +704,7 @@ mod tests {
         let reflector = Arc::new(
             Reflector::from_core(Arc::clone(&core), store, dir.join("reflect-state.json")).unwrap(),
         );
-        let state = AppState::new(core, registry, Some(reflector));
+        let state = AppState::new(core, registry, Some(reflector), None);
 
         let response = request(
             &state,
@@ -1042,5 +1064,223 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /* ---------- M5 file flow ---------- */
+
+    async fn raw_request(
+        state: &AppState,
+        method: axum::http::Method,
+        path: &str,
+        body: Vec<u8>,
+        headers: HeaderMap,
+    ) -> axum::response::Response {
+        let app = router(state.clone());
+        let mut builder = axum::http::Request::builder().method(method).uri(path);
+        for (name, value) in headers.iter() {
+            builder = builder.header(name, value);
+        }
+        let request = builder.body(Body::from(body)).unwrap();
+        app.oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn uploads_land_in_the_workspace_and_serve_with_mime_headers() {
+        let state = AppState::fake();
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=plot.png",
+            b"\x89PNG fake".to_vec(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let (_, body) = response.into_parts();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body.collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(json["path"], "plot.png");
+        assert_eq!(json["size"], 9);
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::GET,
+            "/api/files/plot.png",
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert!(
+            response.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("inline")
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            &b"\x89PNG fake"[..]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_image_artifacts_download_as_attachments() {
+        let state = AppState::fake();
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=data.csv",
+            b"a,b\n1,2\n".to_vec(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::GET,
+            "/api/files/data.csv",
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/csv");
+        assert!(
+            response.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment")
+        );
+    }
+
+    #[tokio::test]
+    async fn traversal_and_absolute_paths_are_forbidden() {
+        let state = AppState::fake();
+        std::fs::write(
+            state.files.as_ref().unwrap().workspace.join("secret.txt"),
+            b"x",
+        )
+        .unwrap();
+        for path in [
+            "/api/files/../secret.txt",
+            "/api/files/%2e%2e/secret.txt",
+            "/api/files/..%2fsecret.txt",
+            "/api/files/%2Fetc%2Fpasswd",
+        ] {
+            let response = raw_request(
+                &state,
+                axum::http::Method::GET,
+                path,
+                Vec::new(),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{path} must be refused"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinks_out_of_the_workspace_are_forbidden() {
+        let state = AppState::fake();
+        let workspace = state.files.as_ref().unwrap().workspace.clone();
+        let outside =
+            std::env::temp_dir().join(format!("kaeru-web-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"no").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("link.txt")).unwrap();
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::GET,
+            "/api/files/link.txt",
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn uploads_are_name_checked_and_size_capped() {
+        let mut state = AppState::fake();
+        state.files.as_mut().unwrap().max_upload_bytes = 8;
+
+        for name in ["../x", ".hidden", "a/b", ""] {
+            let response = raw_request(
+                &state,
+                axum::http::Method::POST,
+                &format!("/api/files?name={name}"),
+                b"data".to_vec(),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{name:?} must be rejected"
+            );
+        }
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=big.bin",
+            vec![b'x'; 9],
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::GET,
+            "/api/files/missing.png",
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn file_routes_require_auth_when_a_token_is_configured() {
+        let state = state_with_token(Some("s3cret"));
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=x.txt",
+            b"x".to_vec(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::GET,
+            "/api/files/x.txt",
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = raw_request(
+            &state,
+            axum::http::Method::POST,
+            "/api/files?name=x.txt",
+            b"x".to_vec(),
+            headers(&[("x-auth-token", "s3cret")]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 }

@@ -18,6 +18,7 @@ pub mod error;
 pub mod events;
 pub mod llm;
 pub mod memory;
+pub mod sandbox;
 pub mod search;
 pub mod session;
 pub mod tools;
@@ -32,8 +33,8 @@ pub use agent::{
 pub use audit::{AuditEntry, AuditLog};
 pub use config::{
     AgentConfig, Config, ContextConfig, DEFAULT_BASE_URL, DEFAULT_MAX_PROMPT_TOKENS, DEFAULT_MODEL,
-    DEFAULT_PORT, Paths, ProviderConfig, ReflectConfig, ReflectorWorkerConfig, SearchConfig,
-    SearchProviderKind, WorkerConfig, WorkersConfig,
+    DEFAULT_PORT, FilesConfig, Paths, ProviderConfig, ReflectConfig, ReflectorWorkerConfig,
+    SandboxConfig, SearchConfig, SearchProviderKind, WorkerConfig, WorkersConfig,
 };
 pub use context::ContextPolicy;
 pub use conversations::{
@@ -49,9 +50,13 @@ pub use llm::{
     Interaction, LlmClient, ModelInfo, RecordingClient, Role, ToolCall,
 };
 pub use memory::{MemoryNote, MemoryStore, memory_block};
+pub use sandbox::{
+    EnvId, FileStamp, Sandbox, ScriptOutcome, inline_mime, mime_hint, resolve_workspace_file,
+    safe_file_name,
+};
 pub use search::{DisabledSearch, FakeSearch, SearchProvider, SearchResult};
 pub use session::{ChatSession, ConversationRegistry, ThreadSummary, TurnHandle};
-pub use tools::{Tool, ToolContext, ToolRegistry};
+pub use tools::{ArtifactSink, Tool, ToolContext, ToolRegistry};
 
 /// Shared core: configuration, the provider client, the tool registry, the
 /// search provider, the worker registry, and the audit log.
@@ -216,14 +221,16 @@ impl AgentCore {
         matches!(self.mode, ClientMode::Fake { .. })
     }
 
-    /// The `ToolContext` a turn's tools run with.
-    pub fn tool_context(&self, turn_id: u64) -> ToolContext {
+    /// The `ToolContext` a turn's tools run with. `artifacts` is the turn's
+    /// artifact sink (M5); `None` outside a turn.
+    pub fn tool_context(&self, turn_id: u64, artifacts: Option<ArtifactSink>) -> ToolContext {
         ToolContext {
             client: Arc::clone(&self.client),
             search: Arc::clone(&self.search),
             workers: Arc::clone(&self.workers),
             audit: self.audit.clone(),
             turn_id,
+            artifacts,
         }
     }
 }

@@ -911,8 +911,11 @@ mod tests {
         Cassette, ChatFuture, ChatRequest, ClientMode, FakeProvider, Interaction, LlmClient,
         ModelsFuture, Role,
     };
+    use crate::sandbox::Sandbox;
     use crate::search::{FakeSearch, SearchResult};
-    use crate::tools::{MemoryStore, MemoryWriteTool, Tool, ToolContext, ToolFuture, ToolRegistry};
+    use crate::tools::{
+        MemoryStore, MemoryWriteTool, PythonTool, Tool, ToolContext, ToolFuture, ToolRegistry,
+    };
     use serde_json::{Value, json};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -2015,6 +2018,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn denied_python_install_is_a_structured_error_and_prepares_nothing() {
+        let dir = temp_dir("python-deny");
+        let sandbox = Arc::new(
+            Sandbox::new(
+                &crate::config::SandboxConfig {
+                    workspace: dir.join("ws"),
+                    read_paths: Vec::new(),
+                    timeout_secs: 10,
+                    memory_mb: 256,
+                },
+                dir.join("envs"),
+            )
+            .unwrap(),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register(PythonTool::new(Arc::clone(&sandbox)));
+        let client = ScriptedClient::new(vec![vec![
+            CoreEvent::ToolCall {
+                id: "c1".into(),
+                name: "python".into(),
+                input: json!({"script": "import pandas", "deps": ["pandas"]}),
+            },
+            CoreEvent::TurnDone { usage: None },
+        ]]);
+        let core = core_scripted(client, registry, AuditLog::disabled());
+        let session = Arc::new(ChatSession::new(core, "test"));
+
+        let handle = session.send("plot something").unwrap();
+        let mut tap = handle.events();
+        let approver = Arc::clone(&session);
+        let watcher = tokio::spawn(async move {
+            while let Ok(event) = tap.recv().await {
+                match event {
+                    CoreEvent::ApprovalRequest { id, .. } => {
+                        approver.approve(&id, Decision::Deny).unwrap();
+                        break;
+                    }
+                    CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
+                    _ => {}
+                }
+            }
+        });
+        let events = drain(handle.into_events()).await;
+        watcher.await.unwrap();
+
+        // The model saw a structured denial (M5 acceptance) and the host was
+        // never touched: no env, no overlay, nothing installed.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CoreEvent::ToolResult { output, is_error, .. }
+                if *is_error && output.contains("denied")
+        )));
+        assert_eq!(std::fs::read_dir(dir.join("envs")).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn raw_fetched_pages_never_reach_the_main_model() {
         // The worker reads the raw page; only its distillation is fenced back.
         let search = std::sync::Arc::new(FakeSearch::from_results(vec![SearchResult {
@@ -2053,7 +2113,7 @@ mod tests {
                 client.clone(),
                 ClientMode::Live,
             )
-            .with_tools(ToolRegistry::with_defaults(5, None))
+            .with_tools(ToolRegistry::with_defaults(5, None, None))
             .with_search(search),
         );
         let session = ChatSession::new(core, "test");

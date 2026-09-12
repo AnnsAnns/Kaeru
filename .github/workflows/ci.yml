@@ -17,6 +17,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Sandbox host tools (bubblewrap + uv, M5)
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Format
         run: cargo fmt --all --check
       - name: Lint

@@ -12,6 +12,7 @@
 mod assets;
 mod bridge;
 mod error;
+mod files;
 mod markdown;
 mod routes;
 
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentCore, AuditLog, ClientMode, Config, ConversationRegistry, ConversationStore, MemoryStore,
-    Paths, Reflector, ToolRegistry,
+    Paths, Reflector, Sandbox, ToolRegistry,
 };
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
@@ -122,12 +123,27 @@ fn main() {
         );
     }
 
+    // M5: the sandbox is mandatory (C11). Fail closed with instructions when
+    // the host cannot provide bubblewrap/uv or user namespaces.
+    let sandbox = match Sandbox::new(&config.sandbox, cli.paths.sandbox_envs.clone()) {
+        Ok(sandbox) => Arc::new(sandbox),
+        Err(err) => {
+            eprintln!("cannot set up the Python sandbox: {err}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(err) = sandbox.check_host() {
+        eprintln!("{}", err.message);
+        std::process::exit(1);
+    }
+
     let memory = MemoryStore::new(cli.paths.memory.clone());
     let core = match AgentCore::connect(config.clone(), mode) {
         Ok(core) => Arc::new(
             core.with_tools(ToolRegistry::with_defaults(
                 config.search.max_results,
                 Some(memory.clone()),
+                Some(Arc::clone(&sandbox)),
             ))
             .with_memory(memory)
             .with_persona(cli.paths.persona.clone())
@@ -150,7 +166,18 @@ fn main() {
         Reflector::from_core(Arc::clone(&core), store, cli.paths.reflect_state.clone())
             .expect("the core always has a memory store here"),
     );
-    let state = AppState::new(core, registry, Some(Arc::clone(&reflector)));
+    let state = AppState::new(
+        Arc::clone(&core),
+        registry,
+        Some(Arc::clone(&reflector)),
+        Some(files::Files {
+            workspace: sandbox.workspace().to_path_buf(),
+            max_upload_bytes: usize::try_from(
+                config.files.max_upload_mb.saturating_mul(1024 * 1024),
+            )
+            .unwrap_or(usize::MAX),
+        }),
+    );
 
     banner(&cli, &config, &state);
 
@@ -220,6 +247,17 @@ fn banner(cli: &Cli, config: &Config, state: &AppState) {
     };
     println!("  search     : {search}");
     println!("  reflect    : {reflect}");
+    println!(
+        "  sandbox    : {} ({}s, {} MiB, workspace {})",
+        if state.core.tools().get("python").is_some() {
+            "on"
+        } else {
+            "off"
+        },
+        config.sandbox.timeout_secs,
+        config.sandbox.memory_mb,
+        config.sandbox.workspace.display()
+    );
     println!("  tools      : {}", state.core.tools().len());
     println!(
         "  audit      : {}",

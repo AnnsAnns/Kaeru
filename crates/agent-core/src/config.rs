@@ -27,6 +27,14 @@ pub const DEFAULT_WORKER_MAX_OUTPUT_TOKENS: u32 = 600;
 pub const DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS: u32 = 1200;
 /// Default local time for the evening reflection (21:00, M4.5/ADR-028).
 pub const DEFAULT_REFLECT_TIME: &str = "21:00";
+/// Default writable workspace inside the Python sandbox (M5).
+pub const DEFAULT_SANDBOX_WORKSPACE: &str = "data/sandbox/workspace";
+/// Default wall-clock limit for one sandboxed script run (M5).
+pub const DEFAULT_SANDBOX_TIMEOUT_SECS: u64 = 60;
+/// Default address-space limit for a sandboxed script (M5).
+pub const DEFAULT_SANDBOX_MEMORY_MB: u64 = 512;
+/// Default upload size cap for the workspace (M5).
+pub const DEFAULT_MAX_UPLOAD_MB: u64 = 50;
 
 const DEFAULT_CONFIG_TOML: &str = r##"# Kaeru configuration. This file holds your provider API key:
 # keep it private (it is written with 0600 permissions and git-ignored).
@@ -111,6 +119,24 @@ persona_edits = true
 [workers.reflector]
 model = ""
 max_output_tokens = 1200
+
+[sandbox]
+# The single folder the Python tool may write to ("the selected workspace").
+# Uploads land here, and artifacts a script writes here are shown in the chat.
+# Relative paths resolve against the process working directory.
+workspace = "data/sandbox/workspace"
+
+# Extra directories exposed to scripts read-only (e.g. a notes folder).
+read_paths = []
+
+# Wall-clock limit for one script run (also caps CPU time) and the
+# address-space limit for the sandboxed process.
+timeout_secs = 60
+memory_mb = 512
+
+[files]
+# Size cap for uploads into the workspace (`POST /api/files`).
+max_upload_mb = 50
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +158,10 @@ pub struct Config {
     pub workers: WorkersConfig,
     #[serde(default)]
     pub reflect: ReflectConfig,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub files: FilesConfig,
 }
 
 fn default_port() -> u16 {
@@ -340,6 +370,68 @@ impl Default for ReflectorWorkerConfig {
     }
 }
 
+fn default_sandbox_workspace() -> PathBuf {
+    PathBuf::from(DEFAULT_SANDBOX_WORKSPACE)
+}
+
+fn default_sandbox_timeout_secs() -> u64 {
+    DEFAULT_SANDBOX_TIMEOUT_SECS
+}
+
+fn default_sandbox_memory_mb() -> u64 {
+    DEFAULT_SANDBOX_MEMORY_MB
+}
+
+/// Python-sandbox configuration (M5): the selected workspace (the only
+/// writable path), extra read-only dirs, and the supervisor limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// The one writable folder inside the sandbox; uploads land here.
+    #[serde(default = "default_sandbox_workspace")]
+    pub workspace: PathBuf,
+    /// Additional directories exposed to scripts read-only.
+    #[serde(default)]
+    pub read_paths: Vec<PathBuf>,
+    /// Wall-clock limit per script run (also bounds CPU time).
+    #[serde(default = "default_sandbox_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Address-space cap for the sandboxed process (RLIMIT_AS).
+    #[serde(default = "default_sandbox_memory_mb")]
+    pub memory_mb: u64,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            workspace: default_sandbox_workspace(),
+            read_paths: Vec::new(),
+            timeout_secs: DEFAULT_SANDBOX_TIMEOUT_SECS,
+            memory_mb: DEFAULT_SANDBOX_MEMORY_MB,
+        }
+    }
+}
+
+fn default_max_upload_mb() -> u64 {
+    DEFAULT_MAX_UPLOAD_MB
+}
+
+/// File-flow configuration (M5): the authenticated upload cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesConfig {
+    #[serde(default = "default_max_upload_mb")]
+    pub max_upload_mb: u64,
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        Self {
+            max_upload_mb: DEFAULT_MAX_UPLOAD_MB,
+        }
+    }
+}
+
 /// Worker registry configuration (the summarizer, M3; the distiller, M4; the
 /// reflector, M4.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +500,8 @@ impl Default for Config {
             search: SearchConfig::default(),
             workers: WorkersConfig::default(),
             reflect: ReflectConfig::default(),
+            sandbox: SandboxConfig::default(),
+            files: FilesConfig::default(),
         }
     }
 }
@@ -540,6 +634,15 @@ impl Config {
         if config.agent.max_steps == 0 {
             config.agent.max_steps = DEFAULT_MAX_STEPS;
         }
+        if config.sandbox.timeout_secs == 0 {
+            config.sandbox.timeout_secs = DEFAULT_SANDBOX_TIMEOUT_SECS;
+        }
+        if config.sandbox.memory_mb == 0 {
+            config.sandbox.memory_mb = DEFAULT_SANDBOX_MEMORY_MB;
+        }
+        if config.files.max_upload_mb == 0 {
+            config.files.max_upload_mb = DEFAULT_MAX_UPLOAD_MB;
+        }
         if config.provider.base_url.is_empty() {
             return Err(ApiError::config("[provider] base_url must not be empty"));
         }
@@ -565,6 +668,8 @@ pub struct Paths {
     pub persona: PathBuf,
     /// Last successful evening-reflection run (M4.5, ADR-028).
     pub reflect_state: PathBuf,
+    /// uv-prepared ephemeral Python environments (M5); disposable.
+    pub sandbox_envs: PathBuf,
 }
 
 impl Default for Paths {
@@ -577,6 +682,7 @@ impl Default for Paths {
             memory: PathBuf::from("data/memory"),
             persona: PathBuf::from("data/persona.md"),
             reflect_state: PathBuf::from("data/reflect-state.json"),
+            sandbox_envs: PathBuf::from("data/sandbox/envs"),
         }
     }
 }
@@ -690,6 +796,43 @@ model = "llama3"
         assert_eq!(config.agent.max_steps, 3);
         assert_eq!(config.workers.summarizer.model, "cheap/m");
         assert_eq!(config.workers.summarizer.max_output_tokens, 128);
+    }
+
+    #[test]
+    fn sandbox_and_files_config_have_defaults_and_are_validated() {
+        let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(
+            config.sandbox.workspace,
+            PathBuf::from(DEFAULT_SANDBOX_WORKSPACE)
+        );
+        assert!(config.sandbox.read_paths.is_empty());
+        assert_eq!(config.sandbox.timeout_secs, DEFAULT_SANDBOX_TIMEOUT_SECS);
+        assert_eq!(config.sandbox.memory_mb, DEFAULT_SANDBOX_MEMORY_MB);
+        assert_eq!(config.files.max_upload_mb, DEFAULT_MAX_UPLOAD_MB);
+        assert_eq!(
+            Paths::default().sandbox_envs,
+            PathBuf::from("data/sandbox/envs")
+        );
+
+        let config = Config::parse(
+            "[provider]\nmodel = \"m\"\n[sandbox]\nworkspace = \"/tmp/ws\"\nread_paths = [\"/tmp/ro\"]\ntimeout_secs = 5\nmemory_mb = 64\n[files]\nmax_upload_mb = 7\n",
+        )
+        .unwrap();
+        assert_eq!(config.sandbox.workspace, PathBuf::from("/tmp/ws"));
+        assert_eq!(config.sandbox.read_paths, vec![PathBuf::from("/tmp/ro")]);
+        assert_eq!(config.sandbox.timeout_secs, 5);
+        assert_eq!(config.sandbox.memory_mb, 64);
+        assert_eq!(config.files.max_upload_mb, 7);
+
+        // Zero means "unset": normalized back to the defaults, never a
+        // division-by-zero-shaped surprise at run time.
+        let config = Config::parse(
+            "[provider]\nmodel = \"m\"\n[sandbox]\ntimeout_secs = 0\nmemory_mb = 0\n[files]\nmax_upload_mb = 0\n",
+        )
+        .unwrap();
+        assert_eq!(config.sandbox.timeout_secs, DEFAULT_SANDBOX_TIMEOUT_SECS);
+        assert_eq!(config.sandbox.memory_mb, DEFAULT_SANDBOX_MEMORY_MB);
+        assert_eq!(config.files.max_upload_mb, DEFAULT_MAX_UPLOAD_MB);
     }
 
     #[test]

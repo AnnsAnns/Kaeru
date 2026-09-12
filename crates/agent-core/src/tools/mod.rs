@@ -1,9 +1,10 @@
 //! The tool seam: a self-describing [`Tool`] trait, a registry, and the tools
-//! (`web_search`, consent-gated `memory_write`, read-only `memory_search`).
-//! Every tool declares its [`Risk`]; risky tools route through the consent flow
-//! (ADR-014).
+//! (`web_search`, consent-gated `memory_write`, read-only `memory_search`, and
+//! the sandboxed `python` tool). Every tool declares its [`Risk`]; risky
+//! tools route through the consent flow (ADR-014).
 
 pub mod memory;
+pub mod python;
 pub mod web_search;
 
 use std::future::Future;
@@ -17,15 +18,40 @@ use crate::audit::AuditLog;
 use crate::error::Result;
 use crate::events::Risk;
 use crate::llm::LlmClient;
+use crate::sandbox::Sandbox;
 use crate::search::SearchProvider;
 use crate::util::truncate_chars;
 
 pub use crate::memory::MemoryStore;
 pub use memory::{MemorySearchTool, MemoryWriteTool};
+pub use python::PythonTool;
 pub use web_search::WebSearchTool;
 
 /// A tool execution future.
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+
+/// The callback behind an [`ArtifactSink`]: `(workspace-relative path, MIME
+/// hint)`.
+type ArtifactEmitter = dyn Fn(&str, Option<&str>) + Send + Sync;
+
+/// How a tool surfaces a workspace file to the frontend (M5, ADR-017). The
+/// agent loop wires it to the turn's event emitter; `path` is relative to the
+/// sandbox workspace.
+#[derive(Clone)]
+pub struct ArtifactSink(Arc<ArtifactEmitter>);
+
+impl ArtifactSink {
+    pub fn new<F>(emit: F) -> Self
+    where
+        F: Fn(&str, Option<&str>) + Send + Sync + 'static,
+    {
+        Self(Arc::new(emit))
+    }
+
+    pub fn emit(&self, path: &str, mime_hint: Option<&str>) {
+        (self.0)(path, mime_hint);
+    }
+}
 
 /// Everything a tool may use. Workers deliberately never receive a
 /// `ToolContext` (C16).
@@ -37,6 +63,9 @@ pub struct ToolContext {
     pub audit: AuditLog,
     /// Turn id for audit entries.
     pub turn_id: u64,
+    /// Where workspace files are surfaced; `None` in contexts without a turn
+    /// (unit tests of unrelated tools).
+    pub artifacts: Option<ArtifactSink>,
 }
 
 /// A capability the model can call (plan §5.2). `schema()` returns the OpenAI
@@ -94,14 +123,22 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    /// The default set: `web_search` (always) plus `memory_write` and
-    /// `memory_search` (only when a memory store is configured).
-    pub fn with_defaults(max_search_results: usize, memory: Option<MemoryStore>) -> Self {
+    /// The default set: `web_search` (always), `memory_write` +
+    /// `memory_search` (only with a memory store), and `python` (only with a
+    /// configured sandbox).
+    pub fn with_defaults(
+        max_search_results: usize,
+        memory: Option<MemoryStore>,
+        sandbox: Option<Arc<Sandbox>>,
+    ) -> Self {
         let mut registry = Self::new();
         registry.register(WebSearchTool::new(max_search_results));
         if let Some(store) = memory {
             registry.register(MemoryWriteTool::new(store.clone()));
             registry.register(MemorySearchTool::new(store));
+        }
+        if let Some(sandbox) = sandbox {
+            registry.register(PythonTool::new(sandbox));
         }
         registry
     }

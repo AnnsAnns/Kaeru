@@ -69,9 +69,13 @@
         <span class="title-label" id="composer-label">Ponder at the Pond 💭</span>
         <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
       </div>
+      <div id="attachments" class="attachments" hidden></div>
       <div class="composer-row">
         <textarea id="composer" rows="1" placeholder="talk to the frogs…"
           enterkeyhint="send" autocomplete="off" spellcheck="true"></textarea>
+        <button id="attach-btn" class="action-btn attach" type="button"
+          title="Upload a file into the workspace">📎</button>
+        <input id="file-input" type="file" hidden>
         <button id="send-btn" class="action-btn" type="button" title="Send (enter)">Ponder</button>
         <button id="stop-btn" class="action-btn stop" type="button" title="Stop generating" hidden>stop</button>
         <button id="regen-btn" class="action-btn" type="button" title="Regenerate the last answer">↻</button>

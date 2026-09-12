@@ -267,16 +267,18 @@ impl Reflector {
     async fn digest(&self, now: u64) -> Result<ReflectOutcome> {
         let last_run = self.last_run();
         let cutoff = rfc3339_from_unix(last_run);
-        let candidates: Vec<Conversation> = self
+        // `>=` (not `>`): a conversation finalized in the same second as the
+        // last run is retried on the next run instead of being skipped
+        // forever. A repeated digest is harmless; a permanent gap loses data.
+        let mut remaining: Vec<Conversation> = self
             .conversations
             .list()?
             .into_iter()
-            .filter(|conversation| conversation.updated_at.as_str() > cutoff.as_str())
+            .filter(|conversation| conversation.updated_at.as_str() >= cutoff.as_str())
             .filter(has_exchange)
-            .take(REFLECT_MAX_CONVERSATIONS)
             .collect();
 
-        if candidates.is_empty() {
+        if remaining.is_empty() {
             self.write_state(now)?;
             return Ok(ReflectOutcome {
                 status: ReflectStatus::Ran,
@@ -286,51 +288,58 @@ impl Reflector {
             });
         }
 
-        // Fence every transcript as data (ADR-016): a day's history can hold
-        // fetched web content, and the reflector must never treat it as
-        // instructions.
         let persona = self.core.persona();
-        let mut content = String::new();
-        if let Some(persona) = &persona {
-            content.push_str("Assistant persona (write in this character):\n");
-            content.push_str(persona);
-            content.push_str("\n\n");
-        }
-        content.push_str("Conversations changed since the last reflection:\n");
-        for conversation in &candidates {
-            let source = conversation
-                .title
-                .clone()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| conversation.id.clone());
-            content.push('\n');
-            content.push_str(&fence(
-                &format!("conversation {source}"),
-                &transcript(conversation),
-            ));
-        }
 
-        let output = self
-            .core
-            .workers()
-            .run("reflector", &content, self.core.audit(), 0)
-            .await?;
-        let reflection = parse_reflection(&output.text);
-        if reflection.notes.is_empty() && reflection.persona.is_none() {
-            return Err(ApiError::internal(
-                "reflector produced no parsable notes; state left untouched",
-            ));
+        // Digest every changed conversation, `REFLECT_MAX_CONVERSATIONS` per
+        // worker call. Iterating (rather than taking one capped batch) means
+        // a backlog is never stranded: the state only advances to `now` after
+        // the entire changed set has been digested.
+        //
+        // Worker output is staged before anything is written: a worker failure
+        // halfway through then leaves memory untouched, so a retry starts from
+        // a clean slate instead of duplicating notes that already landed.
+        let mut staged_notes: Vec<ReflectedNote> = Vec::new();
+        let mut staged_persona: Option<PersonaRevision> = None;
+        let mut digested = 0;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(REFLECT_MAX_CONVERSATIONS);
+            let batch: Vec<Conversation> = remaining.drain(..take).collect();
+            // Fence every transcript as data (ADR-016): a day's history can
+            // hold fetched web content, and the reflector must never treat it
+            // as instructions.
+            let content = digest_content(&batch, persona.as_deref());
+            let output = self
+                .core
+                .workers()
+                .run("reflector", &content, self.core.audit(), 0)
+                .await?;
+            let reflection = parse_reflection(&output.text);
+            if reflection.notes.is_empty() && reflection.persona.is_none() {
+                return Err(ApiError::internal(
+                    "reflector produced no parsable notes; state left untouched",
+                ));
+            }
+            digested += batch.len();
+            staged_notes.extend(reflection.notes);
+            if reflection.persona.is_some() {
+                staged_persona = reflection.persona;
+            }
         }
 
         let mut written = 0;
-        for note in reflection.notes {
+        for note in staged_notes {
+            // A retry after a partial write must not duplicate a note that
+            // already landed.
+            if self.memory.contains_body(&note.body) {
+                continue;
+            }
             let tags = with_reflect_tag(note.tags);
             self.memory.write(&note.body, &tags)?;
             written += 1;
         }
         // Every persona reflection is recorded in memory (why + how), whether
         // or not an actual change was applied (M4.5).
-        let persona_changed = match reflection.persona {
+        let persona_changed = match staged_persona {
             Some(revision) => {
                 let changed = self.record_persona(revision)?;
                 written += 1;
@@ -341,7 +350,7 @@ impl Reflector {
         self.write_state(now)?;
         Ok(ReflectOutcome {
             status: ReflectStatus::Ran,
-            conversations: candidates.len(),
+            conversations: digested,
             notes: written,
             persona_changed,
         })
@@ -451,6 +460,31 @@ impl Reflector {
             ))
         })
     }
+}
+
+/// Render one worker prompt from a batch of conversations: the persona prefix
+/// (when one exists) plus every transcript fenced as data (ADR-016).
+fn digest_content(conversations: &[Conversation], persona: Option<&str>) -> String {
+    let mut content = String::new();
+    if let Some(persona) = persona {
+        content.push_str("Assistant persona (write in this character):\n");
+        content.push_str(persona);
+        content.push_str("\n\n");
+    }
+    content.push_str("Conversations changed since the last reflection:\n");
+    for conversation in conversations {
+        let source = conversation
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| conversation.id.clone());
+        content.push('\n');
+        content.push_str(&fence(
+            &format!("conversation {source}"),
+            &transcript(conversation),
+        ));
+    }
+    content
 }
 
 /// A conversation is a candidate only when it holds a real exchange: at least
@@ -717,38 +751,31 @@ mod tests {
         }
     }
 
+    /// Persist a conversation with an exact `updatedAt` (the store normally
+    /// owns the clock, so tests that need a chosen timestamp write directly).
+    fn save_with_updated(conversations: &ConversationStore, conversation: &Conversation) {
+        std::fs::create_dir_all(conversations.dir()).unwrap();
+        std::fs::write(
+            conversations
+                .dir()
+                .join(format!("{}.json", conversation.id)),
+            serde_json::to_string(conversation).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// The content the digest builds for a conversation set (no persona).
-    fn digest_content(conversations: &ConversationStore) -> String {
-        digest_content_with_persona(conversations, None)
+    fn digest_content_for_store(conversations: &ConversationStore) -> String {
+        digest_content_for_store_with_persona(conversations, None)
     }
 
     /// The content the digest builds, including the persona prefix when given.
-    fn digest_content_with_persona(
+    fn digest_content_for_store_with_persona(
         conversations: &ConversationStore,
         persona: Option<&str>,
     ) -> String {
-        let mut content = String::new();
-        if let Some(persona) = persona {
-            content.push_str("Assistant persona (write in this character):\n");
-            content.push_str(persona);
-            content.push_str("\n\n");
-        }
-        content.push_str("Conversations changed since the last reflection:\n");
-        for conversation in conversations.list().unwrap() {
-            if !has_exchange(&conversation) {
-                continue;
-            }
-            let source = conversation
-                .title
-                .clone()
-                .unwrap_or_else(|| conversation.id.clone());
-            content.push('\n');
-            content.push_str(&fence(
-                &format!("conversation {source}"),
-                &transcript(&conversation),
-            ));
-        }
-        content
+        let list = conversations.list().unwrap();
+        digest_content(&list, persona)
     }
 
     fn reflector(
@@ -889,7 +916,7 @@ mod tests {
             config.provider.model.clone(),
             vec![
                 ChatMessage::system(REFLECTOR_SYSTEM),
-                ChatMessage::user(digest_content(&conversations)),
+                ChatMessage::user(digest_content_for_store(&conversations)),
             ],
         )
         .with_max_tokens(Some(config.workers.reflector.max_output_tokens));
@@ -952,7 +979,7 @@ mod tests {
             config.provider.model.clone(),
             vec![
                 ChatMessage::system(REFLECTOR_SYSTEM),
-                ChatMessage::user(digest_content_with_persona(
+                ChatMessage::user(digest_content_for_store_with_persona(
                     &conversations,
                     Some("I am a pond frog."),
                 )),
@@ -1031,7 +1058,7 @@ mod tests {
             config.provider.model.clone(),
             vec![
                 ChatMessage::system(REFLECTOR_SYSTEM),
-                ChatMessage::user(digest_content_with_persona(
+                ChatMessage::user(digest_content_for_store_with_persona(
                     &conversations,
                     Some("I am a pond frog."),
                 )),
@@ -1109,7 +1136,7 @@ mod tests {
             config.provider.model.clone(),
             vec![
                 ChatMessage::system(REFLECTOR_SYSTEM),
-                ChatMessage::user(digest_content_with_persona(
+                ChatMessage::user(digest_content_for_store_with_persona(
                     &conversations,
                     Some("I am a pond frog."),
                 )),
@@ -1181,7 +1208,7 @@ mod tests {
             config.provider.model.clone(),
             vec![
                 ChatMessage::system(REFLECTOR_SYSTEM),
-                ChatMessage::user(digest_content(&conversations)),
+                ChatMessage::user(digest_content_for_store(&conversations)),
             ],
         )
         .with_max_tokens(Some(config.workers.reflector.max_output_tokens));
@@ -1246,6 +1273,174 @@ mod tests {
         assert_eq!(outcome.conversations, 0);
         assert_eq!(outcome.notes, 0);
         assert_eq!(reflector.last_run(), 2_000_000_000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn every_changed_conversation_is_digested_past_the_batch_cap() {
+        let dir = temp_dir("batches");
+        let conversations = ConversationStore::new(dir.join("conversations"));
+        // One more changed conversation than a single worker batch holds, with
+        // distinct timestamps so newest-first order (and the split) is stable.
+        for i in 0..(REFLECT_MAX_CONVERSATIONS + 1) {
+            save_with_updated(
+                &conversations,
+                &conversation(
+                    &format!("t{i:02}"),
+                    &format!("2099-01-{:02}T10:00:00Z", i + 1),
+                    vec![("user", "hi"), ("assistant", "hello")],
+                ),
+            );
+        }
+        let all = conversations.list().unwrap();
+        assert_eq!(all.len(), REFLECT_MAX_CONVERSATIONS + 1);
+        let batches = [
+            all[..REFLECT_MAX_CONVERSATIONS].to_vec(),
+            all[REFLECT_MAX_CONVERSATIONS..].to_vec(),
+        ];
+
+        let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
+        let interactions = batches
+            .iter()
+            .enumerate()
+            .map(|(i, batch)| Interaction {
+                request: ChatRequest::new(
+                    config.provider.model.clone(),
+                    vec![
+                        ChatMessage::system(REFLECTOR_SYSTEM),
+                        ChatMessage::user(digest_content(batch, None)),
+                    ],
+                )
+                .with_max_tokens(Some(config.workers.reflector.max_output_tokens)),
+                events: vec![
+                    CoreEvent::Delta {
+                        text: format!("batch{i}\n---\nnote from batch {i}\n"),
+                    },
+                    CoreEvent::TurnDone { usage: None },
+                ],
+            })
+            .collect();
+        let cassette = Cassette {
+            cassette_version: crate::llm::CASSETTE_VERSION,
+            recorded_at_unix: None,
+            base_url: None,
+            models: vec![],
+            interactions,
+        };
+        let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
+        let reflector = reflector(config, client, &dir, conversations);
+
+        let outcome = reflector.run_now(2_000_000_000).await.unwrap();
+        assert_eq!(outcome.status, ReflectStatus::Ran);
+        assert_eq!(
+            outcome.conversations,
+            REFLECT_MAX_CONVERSATIONS + 1,
+            "every changed conversation is digested, not just the newest batch"
+        );
+        assert_eq!(outcome.notes, 2);
+        assert_eq!(reflector.memory.list().len(), 2);
+        assert_eq!(reflector.last_run(), 2_000_000_000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_conversation_from_the_last_runs_second_is_retried_not_skipped() {
+        let dir = temp_dir("same-second");
+        let conversations = ConversationStore::new(dir.join("conversations"));
+        let now = 2_000_000_000u64;
+        save_with_updated(
+            &conversations,
+            &conversation(
+                "t1",
+                &rfc3339_from_unix(now),
+                vec![("user", "hi"), ("assistant", "hello")],
+            ),
+        );
+        let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
+        let request = ChatRequest::new(
+            config.provider.model.clone(),
+            vec![
+                ChatMessage::system(REFLECTOR_SYSTEM),
+                ChatMessage::user(digest_content_for_store(&conversations)),
+            ],
+        )
+        .with_max_tokens(Some(config.workers.reflector.max_output_tokens));
+        let cassette = Cassette {
+            cassette_version: crate::llm::CASSETTE_VERSION,
+            recorded_at_unix: None,
+            base_url: None,
+            models: vec![],
+            interactions: vec![Interaction {
+                request,
+                events: vec![
+                    CoreEvent::Delta {
+                        text: "second\n---\nnoted in the same second\n".into(),
+                    },
+                    CoreEvent::TurnDone { usage: None },
+                ],
+            }],
+        };
+        let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
+        let reflector = reflector(config, client, &dir, conversations);
+        // The previous run finished exactly in this conversation's second.
+        reflector.write_state(now).unwrap();
+
+        let outcome = reflector.run_now(now).await.unwrap();
+        assert_eq!(
+            outcome.conversations, 1,
+            "a same-second conversation is retried, not skipped forever"
+        );
+        assert_eq!(outcome.notes, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_a_partial_run_does_not_duplicate_notes() {
+        let dir = temp_dir("retry-dedupe");
+        let conversations = ConversationStore::new(dir.join("conversations"));
+        conversations
+            .save(&conversation(
+                "t1",
+                "2099-01-01T10:00:00Z",
+                vec![("user", "hi"), ("assistant", "hello")],
+            ))
+            .unwrap();
+        let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
+        let request = ChatRequest::new(
+            config.provider.model.clone(),
+            vec![
+                ChatMessage::system(REFLECTOR_SYSTEM),
+                ChatMessage::user(digest_content_for_store(&conversations)),
+            ],
+        )
+        .with_max_tokens(Some(config.workers.reflector.max_output_tokens));
+        let cassette = Cassette {
+            cassette_version: crate::llm::CASSETTE_VERSION,
+            recorded_at_unix: None,
+            base_url: None,
+            models: vec![],
+            interactions: vec![Interaction {
+                request,
+                events: vec![
+                    CoreEvent::Delta {
+                        text: "one\n---\nfirst note\n===\ntwo\n---\nsecond note\n".into(),
+                    },
+                    CoreEvent::TurnDone { usage: None },
+                ],
+            }],
+        };
+        let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::from_cassette(cassette));
+        let reflector = reflector(config, client, &dir, conversations);
+
+        let outcome = reflector.run_now(2_000_000_000).await.unwrap();
+        assert_eq!(outcome.notes, 2);
+        // Simulate a run that wrote its notes but crashed before advancing the
+        // state: the retry must not store the same notes again.
+        reflector.write_state(0).unwrap();
+        let retry = reflector.run_now(2_000_000_000).await.unwrap();
+        assert_eq!(retry.conversations, 1);
+        assert_eq!(retry.notes, 0, "identical notes are not written twice");
+        assert_eq!(reflector.memory.list().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

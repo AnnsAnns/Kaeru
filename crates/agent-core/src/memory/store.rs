@@ -66,6 +66,14 @@ impl MemoryStore {
         Ok(path)
     }
 
+    /// Whether a note with exactly this body (trimmed) already exists. Used by
+    /// the reflector so a retried run does not duplicate notes that landed
+    /// before a partial failure.
+    pub fn contains_body(&self, content: &str) -> bool {
+        let body = content.trim();
+        self.list().iter().any(|note| note.content.trim() == body)
+    }
+
     /// Every readable note, newest first. A missing directory is empty; a
     /// broken or non-markdown file is skipped, never fatal.
     pub fn list(&self) -> Vec<MemoryNote> {

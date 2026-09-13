@@ -245,17 +245,11 @@ fn push_stream(report: &mut String, name: &str, text: &str) {
 mod tests {
     use super::*;
     use crate::config::SandboxConfig;
+    use crate::util::temp_dir;
     use std::path::PathBuf;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kaeru-py-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn tool(name: &str) -> (PythonTool, PathBuf) {
-        let root = temp_dir(name);
+        let root = temp_dir("py", name);
         let config = SandboxConfig {
             workspace: root.join("ws"),
             read_paths: Vec::new(),

@@ -190,14 +190,7 @@ fn tail(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kaeru-env-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::util::temp_dir;
 
     #[test]
     fn dep_sets_normalize_and_hash_order_independently() {
@@ -216,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_completed_env_is_reused_without_running_uv() {
-        let envs = temp_dir("reuse");
+        let envs = temp_dir("env", "reuse");
         let deps = vec!["pandas".to_owned()];
         let id = env_id(&deps);
         assert!(!prepared(&envs, &deps));

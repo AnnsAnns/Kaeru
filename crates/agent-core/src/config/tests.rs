@@ -1,10 +1,5 @@
 use super::*;
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kaeru-test-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use crate::util::temp_dir;
 
 #[test]
 fn parse_full_config() {
@@ -175,7 +170,7 @@ fn reflect_config_defaults_off_and_normalizes_time() {
 
 #[test]
 fn load_creates_default_file_with_tight_permissions() {
-    let dir = temp_dir("load-default");
+    let dir = temp_dir("test", "load-default");
     let path = dir.join("data/config.toml");
     let config = Config::load(&path).unwrap();
     assert!(path.is_file());
@@ -193,7 +188,7 @@ fn load_creates_default_file_with_tight_permissions() {
 
 #[test]
 fn load_reports_broken_config_with_path() {
-    let dir = temp_dir("load-broken");
+    let dir = temp_dir("test", "load-broken");
     let path = dir.join("config.toml");
     std::fs::write(&path, "port = \"not-a-number\"\n").unwrap();
     let err = Config::load(&path).unwrap_err();

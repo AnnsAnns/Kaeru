@@ -37,8 +37,8 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 ## Layout
 
 ```
-crates/agent-core/     library: config, events, llm (client/sse/fake/types), session (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python), sandbox (envprep/exec/limits/workspace), search, audit, memory
-crates/agent-web/      axum binary: main.rs (CLI), routes.rs, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
+crates/agent-core/     library: config, events, llm (client/sse/fake/types/wire), session/{mod,turn,approvals,registry} (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python), sandbox (envprep/exec/limits/workspace), search, audit, memory
+crates/agent-web/      axum binary: main.rs (CLI), routes/{mod,handlers}, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
 data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + sandbox/{workspace,envs}
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)

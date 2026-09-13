@@ -4,14 +4,8 @@ use crate::config::Config;
 use crate::conversations::{CONVERSATION_SCHEMA_VERSION, StoredMessage};
 use crate::events::{CoreEvent, Usage};
 use crate::llm::{Cassette, ChatMessage, ChatRequest, FakeProvider, Interaction, LlmClient};
+use crate::util::temp_dir;
 use std::path::Path;
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kaeru-reflect-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn conversation(id: &str, updated_at: &str, messages: Vec<(&str, &str)>) -> Conversation {
     Conversation {
@@ -149,7 +143,7 @@ fn reflect_tag_is_added_once() {
 
 #[test]
 fn scheduling_is_due_when_last_run_precedes_the_cycle() {
-    let dir = temp_dir("sched");
+    let dir = temp_dir("reflect", "sched");
     let config = Config::parse("[reflect]\nenabled = true\n").unwrap();
     let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
     let reflector = reflector(
@@ -172,7 +166,7 @@ fn scheduling_is_due_when_last_run_precedes_the_cycle() {
 
 #[test]
 fn disabled_is_never_due() {
-    let dir = temp_dir("disabled");
+    let dir = temp_dir("reflect", "disabled");
     let config = Config::parse("[reflect]\nenabled = false\n").unwrap();
     let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
     let reflector = reflector(
@@ -187,7 +181,7 @@ fn disabled_is_never_due() {
 
 #[tokio::test]
 async fn successful_run_writes_notes_and_advances_state() {
-    let dir = temp_dir("success");
+    let dir = temp_dir("reflect", "success");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(
@@ -248,7 +242,7 @@ async fn successful_run_writes_notes_and_advances_state() {
 
 #[tokio::test]
 async fn persona_revision_is_applied_and_recorded_in_memory() {
-    let dir = temp_dir("persona-apply");
+    let dir = temp_dir("reflect", "persona-apply");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(
@@ -324,7 +318,7 @@ async fn persona_revision_is_applied_and_recorded_in_memory() {
 
 #[tokio::test]
 async fn persona_consideration_only_is_recorded_without_changing_the_file() {
-    let dir = temp_dir("persona-think");
+    let dir = temp_dir("reflect", "persona-think");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(
@@ -399,7 +393,7 @@ async fn persona_consideration_only_is_recorded_without_changing_the_file() {
 
 #[tokio::test]
 async fn persona_edits_disabled_records_the_reflection_but_not_the_change() {
-    let dir = temp_dir("persona-off");
+    let dir = temp_dir("reflect", "persona-off");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(
@@ -470,7 +464,7 @@ async fn persona_edits_disabled_records_the_reflection_but_not_the_change() {
 
 #[tokio::test]
 async fn a_failed_run_leaves_state_untouched() {
-    let dir = temp_dir("failed");
+    let dir = temp_dir("reflect", "failed");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(
@@ -514,7 +508,7 @@ async fn a_failed_run_leaves_state_untouched() {
 
 #[tokio::test]
 async fn disabled_run_reports_disabled_without_touching_state() {
-    let dir = temp_dir("off");
+    let dir = temp_dir("reflect", "off");
     let config = Config::parse("[reflect]\nenabled = false\n").unwrap();
     let client: Arc<dyn LlmClient> = Arc::new(FakeProvider::builtin());
     let reflector = reflector(
@@ -531,7 +525,7 @@ async fn disabled_run_reports_disabled_without_touching_state() {
 
 #[tokio::test]
 async fn empty_run_advances_state_without_calling_the_worker() {
-    let dir = temp_dir("empty");
+    let dir = temp_dir("reflect", "empty");
     let conversations = ConversationStore::new(dir.join("conversations"));
     // A conversation with no exchange must not be a candidate.
     conversations
@@ -555,7 +549,7 @@ async fn empty_run_advances_state_without_calling_the_worker() {
 
 #[tokio::test]
 async fn every_changed_conversation_is_digested_past_the_batch_cap() {
-    let dir = temp_dir("batches");
+    let dir = temp_dir("reflect", "batches");
     let conversations = ConversationStore::new(dir.join("conversations"));
     // One more changed conversation than a single worker batch holds, with
     // distinct timestamps so newest-first order (and the split) is stable.
@@ -622,7 +616,7 @@ async fn every_changed_conversation_is_digested_past_the_batch_cap() {
 
 #[tokio::test]
 async fn a_conversation_from_the_last_runs_second_is_retried_not_skipped() {
-    let dir = temp_dir("same-second");
+    let dir = temp_dir("reflect", "same-second");
     let conversations = ConversationStore::new(dir.join("conversations"));
     let now = 2_000_000_000u64;
     save_with_updated(
@@ -673,7 +667,7 @@ async fn a_conversation_from_the_last_runs_second_is_retried_not_skipped() {
 
 #[tokio::test]
 async fn a_retry_after_a_partial_run_does_not_duplicate_notes() {
-    let dir = temp_dir("retry-dedupe");
+    let dir = temp_dir("reflect", "retry-dedupe");
     let conversations = ConversationStore::new(dir.join("conversations"));
     conversations
         .save(&conversation(

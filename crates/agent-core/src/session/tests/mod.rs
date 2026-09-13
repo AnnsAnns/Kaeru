@@ -13,6 +13,7 @@ use crate::search::{FakeSearch, SearchResult};
 use crate::tools::{
     MemoryStore, MemoryWriteTool, PythonTool, Tool, ToolContext, ToolFuture, ToolRegistry,
 };
+use crate::util::temp_dir;
 use serde_json::{Value, json};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -155,13 +156,6 @@ fn core_scripted(
             .with_tools(tools)
             .with_audit(audit),
     )
-}
-
-fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("kaeru-m3-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 #[tokio::test]

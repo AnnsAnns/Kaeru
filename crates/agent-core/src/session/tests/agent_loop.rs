@@ -83,7 +83,7 @@ async fn tool_calls_run_and_their_result_is_fenced() {
 
 #[tokio::test]
 async fn consent_gated_tool_waits_then_persists_when_allowed() {
-    let dir = temp_dir("consent-allow");
+    let dir = temp_dir("m3", "consent-allow");
     let audit_path = dir.join("audit.jsonl");
     let mut registry = ToolRegistry::new();
     registry.register(MemoryWriteTool::new(MemoryStore::new(dir.join("memory"))));
@@ -149,7 +149,7 @@ async fn consent_gated_tool_waits_then_persists_when_allowed() {
 
 #[tokio::test]
 async fn denied_consent_writes_nothing_and_is_audited() {
-    let dir = temp_dir("consent-deny");
+    let dir = temp_dir("m3", "consent-deny");
     let audit_path = dir.join("audit.jsonl");
     let mut registry = ToolRegistry::new();
     registry.register(MemoryWriteTool::new(MemoryStore::new(dir.join("memory"))));
@@ -195,7 +195,7 @@ async fn denied_consent_writes_nothing_and_is_audited() {
 
 #[tokio::test]
 async fn denied_python_install_is_a_structured_error_and_prepares_nothing() {
-    let dir = temp_dir("python-deny");
+    let dir = temp_dir("m3", "python-deny");
     let sandbox = Arc::new(
         Sandbox::new(
             &crate::config::SandboxConfig {
@@ -349,7 +349,7 @@ async fn regenerate_reruns_the_last_user_message() {
 
 #[tokio::test]
 async fn memory_is_injected_into_the_next_turn_within_budget() {
-    let dir = temp_dir("memory-inject");
+    let dir = temp_dir("m3", "memory-inject");
     let store = MemoryStore::new(dir.join("memory"));
     store
         .write("The user's pet frog is named Kaeru", &["pets".into()])
@@ -395,7 +395,7 @@ async fn memory_is_injected_into_the_next_turn_within_budget() {
 
 #[tokio::test]
 async fn persona_becomes_the_system_prompt_and_reloads_per_turn() {
-    let dir = temp_dir("persona");
+    let dir = temp_dir("m3", "persona");
     let persona = dir.join("persona.md");
     std::fs::write(&persona, "You are a small pond frog. Be terse.\n").unwrap();
 
@@ -433,7 +433,7 @@ async fn persona_becomes_the_system_prompt_and_reloads_per_turn() {
 
 #[tokio::test]
 async fn a_missing_persona_file_adds_no_system_message() {
-    let dir = temp_dir("no-persona");
+    let dir = temp_dir("m3", "no-persona");
     let client = ScriptedClient::new(vec![vec![
         CoreEvent::Delta { text: "ok".into() },
         CoreEvent::TurnDone { usage: None },

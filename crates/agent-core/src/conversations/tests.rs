@@ -1,9 +1,7 @@
 use super::*;
 
 fn temp_store(name: &str) -> (ConversationStore, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("kaeru-test-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::util::temp_dir("test", name);
     (ConversationStore::new(&dir), dir)
 }
 

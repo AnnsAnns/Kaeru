@@ -170,11 +170,7 @@ impl ChatSession {
     /// The model used for the next turn: per-conversation override, else the
     /// configured default.
     pub fn current_model(&self) -> String {
-        let inner = self.lock();
-        inner
-            .model_override
-            .clone()
-            .unwrap_or_else(|| self.core.config().provider.model.clone())
+        model_for(&self.lock(), &self.core)
     }
 
     /// Set or clear (None) the per-conversation model override.
@@ -185,14 +181,7 @@ impl ChatSession {
     /// The reasoning effort used for the next turn: per-conversation override,
     /// else the configured default, else the provider's own default.
     pub fn current_reasoning_effort(&self) -> Option<String> {
-        let inner = self.lock();
-        inner.reasoning_effort_override.clone().or_else(|| {
-            self.core
-                .config()
-                .provider
-                .reasoning_effort()
-                .map(str::to_owned)
-        })
+        reasoning_effort_for(&self.lock(), &self.core)
     }
 
     /// Set or clear (None) the per-conversation reasoning effort override.
@@ -263,17 +252,8 @@ impl ChatSession {
             ));
         }
 
-        let model = inner
-            .model_override
-            .clone()
-            .unwrap_or_else(|| self.core.config().provider.model.clone());
-        let reasoning_effort = inner.reasoning_effort_override.clone().or_else(|| {
-            self.core
-                .config()
-                .provider
-                .reasoning_effort()
-                .map(str::to_owned)
-        });
+        let model = model_for(&inner, &self.core);
+        let reasoning_effort = reasoning_effort_for(&inner, &self.core);
         inner
             .history
             .push(ChatMessage::user(message).with_artifacts(attachments));
@@ -449,6 +429,23 @@ impl SessionInner {
             );
         }
     }
+}
+
+/// The model for the next turn: per-conversation override, else the default.
+fn model_for(inner: &SessionInner, core: &AgentCore) -> String {
+    inner
+        .model_override
+        .clone()
+        .unwrap_or_else(|| core.config().provider.model.clone())
+}
+
+/// The reasoning effort for the next turn: override, else the configured
+/// default, else the provider's own.
+fn reasoning_effort_for(inner: &SessionInner, core: &AgentCore) -> Option<String> {
+    inner
+        .reasoning_effort_override
+        .clone()
+        .or_else(|| core.config().provider.reasoning_effort().map(str::to_owned))
 }
 
 /// Title for a conversation, from its first user message.

@@ -3,8 +3,7 @@ use super::*;
 /* ---------- ConversationRegistry (M2.5, §5.5 / ADR-024) ---------- */
 
 fn registry(name: &str) -> (ConversationRegistry, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("kaeru-test-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::util::temp_dir("test", name);
     let registry = ConversationRegistry::new(
         core_with(FakeProvider::builtin()),
         ConversationStore::new(&dir),

@@ -127,13 +127,7 @@ pub fn is_internal_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kaeru-ws-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::util::temp_dir;
 
     #[test]
     fn upload_names_must_be_single_ordinary_components() {
@@ -155,7 +149,7 @@ mod tests {
 
     #[test]
     fn resolution_reads_inside_the_workspace_and_refuses_escapes() {
-        let root = temp_dir("resolve");
+        let root = temp_dir("ws", "resolve");
         std::fs::write(root.join("plot.png"), b"png").unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/data.csv"), b"a,b").unwrap();
@@ -169,7 +163,7 @@ mod tests {
             std::fs::canonicalize(root.join("sub/data.csv")).unwrap()
         );
 
-        let outside = temp_dir("resolve-outside");
+        let outside = temp_dir("ws", "resolve-outside");
         std::fs::write(outside.join("secret.txt"), b"no").unwrap();
         for bad in ["../secret.txt", "sub/../../secret.txt", "/etc/passwd"] {
             let err = resolve_workspace_file(&root, bad).unwrap_err();

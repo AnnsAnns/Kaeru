@@ -19,9 +19,7 @@ fn sample_cassette() -> Cassette {
 }
 
 fn temp_cassette_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kaeru-fake-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("cassette.json")
+    crate::util::temp_dir("fake", name).join("cassette.json")
 }
 
 async fn collect(rx: mpsc::Receiver<CoreEvent>) -> Vec<CoreEvent> {

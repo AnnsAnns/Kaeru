@@ -55,6 +55,16 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         .map_err(|e| ApiError::internal(format!("cannot finalize {}: {e}", path.display())))
 }
 
+/// A fresh per-test directory under the system temp dir, unique per process
+/// and `name`.
+#[cfg(test)]
+pub(crate) fn temp_dir(suite: &str, name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("kaeru-{suite}-{}-{name}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

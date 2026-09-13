@@ -275,9 +275,7 @@ mod tests {
     use std::sync::Arc;
 
     fn temp_store(name: &str) -> MemoryStore {
-        let dir = std::env::temp_dir().join(format!("kaeru-memory-{}-{name}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        MemoryStore::new(dir)
+        MemoryStore::new(crate::util::temp_dir("memory", name))
     }
 
     fn context_with_distiller(candidate: &str, events: Option<Vec<CoreEvent>>) -> ToolContext {

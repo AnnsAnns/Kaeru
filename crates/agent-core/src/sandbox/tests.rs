@@ -1,14 +1,8 @@
 use super::*;
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kaeru-sb-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use crate::util::temp_dir;
 
 fn sandbox(name: &str) -> Sandbox {
-    let root = temp_dir(name);
+    let root = temp_dir("sb", name);
     let config = SandboxConfig {
         workspace: root.join("ws"),
         read_paths: Vec::new(),
@@ -28,7 +22,7 @@ fn new_creates_the_workspace_and_envs_dirs() {
 }
 
 fn sandbox_with(name: &str, timeout_secs: u64, memory_mb: u64) -> Sandbox {
-    let root = temp_dir(name);
+    let root = temp_dir("sb", name);
     let config = SandboxConfig {
         workspace: root.join("ws"),
         read_paths: Vec::new(),
@@ -132,7 +126,7 @@ async fn the_wall_clock_timeout_kills_a_hung_script() {
 
 #[tokio::test]
 async fn extra_read_paths_are_visible_and_read_only() {
-    let root = temp_dir("reads");
+    let root = temp_dir("sb", "reads");
     let shared = root.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join("notes.txt"), b"hello-read-path").unwrap();

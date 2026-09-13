@@ -1,6 +1,10 @@
 //! Small shared text helpers. One home for the token estimate, the truncation
 //! rule and the `tags:` line parser that used to be copied per module.
 
+use std::path::Path;
+
+use crate::error::{ApiError, Result};
+
 /// Deterministic token estimate: ~4 characters per token (ADR-018).
 /// Deliberately crude and stable — the budget governs shape, not billing.
 pub(crate) const CHARS_PER_TOKEN: u64 = 4;
@@ -34,6 +38,23 @@ pub(crate) fn parse_tag_line(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Write `contents` to `path` atomically: a `<ext>.tmp` sibling, then rename
+/// over the target, so a crash never leaves a half-written file. The parent
+/// directory is created when missing.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ApiError::internal(format!("cannot create dir {}: {e}", parent.display()))
+        })?;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    std::fs::write(&tmp, contents)
+        .map_err(|e| ApiError::internal(format!("cannot write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| ApiError::internal(format!("cannot finalize {}: {e}", path.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +74,15 @@ mod tests {
         assert_eq!(parse_tag_line("Tags: [frogs]"), vec!["frogs"]);
         assert_eq!(parse_tag_line("plain, \"quoted\""), vec!["plain", "quoted"]);
         assert!(parse_tag_line("   ").is_empty());
+    }
+
+    #[test]
+    fn write_atomic_creates_the_parent_and_writes_the_file() {
+        let dir = std::env::temp_dir().join(format!("kaeru-util-{}", std::process::id()));
+        let path = dir.join("nested").join("note.md");
+        write_atomic(&path, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        assert!(!dir.join("nested").join("md.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -151,29 +151,8 @@ impl ConversationStore {
         stamped.updated_at = now_rfc3339();
         let text = serde_json::to_string_pretty(&stamped)
             .map_err(|e| ApiError::internal(format!("cannot serialize conversation: {e}")))?;
-        std::fs::create_dir_all(&self.dir).map_err(|e| {
-            ApiError::new(
-                ApiErrorKind::Internal,
-                format!(
-                    "cannot create conversations dir {}: {e}",
-                    self.dir.display()
-                ),
-            )
-        })?;
         let path = self.path_for(&conversation.id)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &text).map_err(|e| {
-            ApiError::new(
-                ApiErrorKind::Internal,
-                format!("cannot write {}: {e}", tmp.display()),
-            )
-        })?;
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            ApiError::new(
-                ApiErrorKind::Internal,
-                format!("cannot finalize {}: {e}", path.display()),
-            )
-        })
+        crate::util::write_atomic(&path, &text)
     }
 
     /// Load a conversation. `Ok(None)` when absent — or when the file is

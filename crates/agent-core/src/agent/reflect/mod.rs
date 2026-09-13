@@ -421,32 +421,13 @@ impl Reflector {
 
     /// Persist the run time atomically (tmp + rename).
     fn write_state(&self, now: u64) -> Result<()> {
-        if let Some(parent) = self
-            .state_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ApiError::internal(format!(
-                    "cannot create reflect state dir {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
         let state = ReflectState { last_run: now };
         let text = serde_json::to_string_pretty(&state)
             .map_err(|e| ApiError::internal(format!("cannot serialize reflect state: {e}")))?;
-        let tmp = self.state_path.with_extension("json.tmp");
-        std::fs::write(&tmp, text)
-            .map_err(|e| ApiError::internal(format!("cannot write {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, &self.state_path).map_err(|e| {
-            ApiError::internal(format!(
-                "cannot finalize {}: {e}",
-                self.state_path.display()
-            ))
-        })
+        crate::util::write_atomic(&self.state_path, &text)
     }
 }
+
 /// Render one worker prompt from a batch of conversations: the persona prefix
 /// (when one exists) plus every transcript fenced as data (ADR-016).
 fn digest_content(conversations: &[Conversation], persona: Option<&str>) -> String {
@@ -507,19 +488,7 @@ fn with_reflect_tag(mut tags: Vec<String>) -> Vec<String> {
 
 /// Write the persona file atomically (tmp + rename), creating its parent.
 fn write_persona(path: &std::path::Path, text: &str) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            ApiError::internal(format!(
-                "cannot create persona dir {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, format!("{text}\n"))
-        .map_err(|e| ApiError::internal(format!("cannot write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| ApiError::internal(format!("cannot finalize {}: {e}", path.display())))
+    crate::util::write_atomic(path, &format!("{text}\n"))
 }
 
 fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {

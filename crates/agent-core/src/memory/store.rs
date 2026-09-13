@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::{ApiError, Result};
+use crate::error::Result;
 
 /// One markdown memory note read from disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,23 +52,14 @@ impl MemoryStore {
     /// Atomic like the other data stores: write `.tmp`, then rename over the
     /// final name, so a crash mid-write never leaves a half-written note.
     pub fn write(&self, content: &str, tags: &[String]) -> Result<PathBuf> {
-        let dir = self.day_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            ApiError::internal(format!("cannot create memory dir {}: {e}", dir.display()))
-        })?;
-        let path = dir.join(format!("{}.md", self.file_stem(content)));
+        let path = self.day_dir().join(format!("{}.md", self.file_stem(content)));
         let document = format!(
             "---\ntags: {}\ncreated: {}\n---\n{}\n",
             format_tags(tags),
             local_date(),
             content.trim()
         );
-        let tmp = path.with_extension("md.tmp");
-        std::fs::write(&tmp, document).map_err(|e| {
-            ApiError::internal(format!("cannot write memory {}: {e}", tmp.display()))
-        })?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| ApiError::internal(format!("cannot finalize {}: {e}", path.display())))?;
+        crate::util::write_atomic(&path, &document)?;
         Ok(path)
     }
 

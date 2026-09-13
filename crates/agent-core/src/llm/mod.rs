@@ -6,6 +6,7 @@ pub mod client;
 pub mod fake;
 pub mod sse;
 pub mod types;
+pub(crate) mod wire;
 
 pub use client::{ChatFuture, HttpClient, LlmClient, ModelsFuture};
 pub use fake::{CASSETTE_VERSION, Cassette, FakeProvider, Interaction, RecordingClient};

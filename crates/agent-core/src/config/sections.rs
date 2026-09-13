@@ -60,7 +60,7 @@ fn default_search_results() -> usize {
 }
 
 /// Web-search configuration (M3). `provider` selects the backend; an unknown
-/// value is normalized to `off` by [`Config::validate`].
+/// value is normalized to `off` by `Config::validate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchConfig {
@@ -301,7 +301,7 @@ pub struct ProviderConfig {
     #[serde(default = "default_model")]
     pub model: String,
     /// Optional reasoning effort for models that support it. Empty means the
-    /// provider's own default; normalized to `None` by [`Config::parse`].
+    /// provider's own default; normalized to `None` by [`crate::Config::parse`].
     #[serde(default)]
     pub reasoning_effort: Option<String>,
 }

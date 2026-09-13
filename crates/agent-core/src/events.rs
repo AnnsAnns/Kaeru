@@ -135,20 +135,20 @@ pub enum CoreEvent {
     /// One incremental chunk of model "thinking" (`reasoning_content`), kept
     /// out of the conversation context and shown as a collapsible block.
     Reasoning { text: String },
-    /// The model requested a tool call [M3].
+    /// The model requested a tool call \[M3].
     ToolCall {
         id: String,
         name: String,
         input: Value,
     },
-    /// A tool finished; `output` is the fenced result the model will see [M3].
+    /// A tool finished; `output` is the fenced result the model will see \[M3].
     ToolResult {
         id: String,
         name: String,
         output: String,
         is_error: bool,
     },
-    /// A workspace file surfaced for display/download [M5].
+    /// A workspace file surfaced for display/download \[M5].
     Artifact {
         path: String,
         mime_hint: Option<String>,
@@ -228,9 +228,9 @@ pub enum ApprovalKind {
     /// write is a prompt-injection vector and always needs consent (M3,
     /// ADR-016).
     MemoryWrite { path: String },
-    /// Install Python packages from the configured index [M5].
+    /// Install Python packages from the configured index \[M5].
     PackageInstall { packages: Vec<String> },
-    /// Grant network access inside the sandbox [M5].
+    /// Grant network access inside the sandbox \[M5].
     NetworkAccess { reason: String },
 }
 

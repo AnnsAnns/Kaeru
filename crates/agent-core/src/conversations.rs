@@ -112,7 +112,7 @@ pub struct Conversation {
     /// change and used to order threads newest-first (M2.5).
     #[serde(rename = "updatedAt", default)]
     pub updated_at: String,
-    /// Rolling summary of turns that fell out of the context window [M2].
+    /// Rolling summary of turns that fell out of the context window \[M2].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default)]

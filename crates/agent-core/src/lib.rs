@@ -1,13 +1,7 @@
-//! Kaeru `agent-core` — the platform-agnostic agent library.
-//!
-//! Frontends (`agent-web`, later `agent-discord`) embed this crate in-process
-//! and translate `CoreEvent`s into platform idioms. No frontend concept (HTTP,
-//! HTML, Discord) is allowed in here (C2, ADR-010).
-//!
-//! Surface: config, the OpenAI-compatible client seam (real/fake/record), the
-//! decoupled `ChatSession` turn executor, and (M3) the tool-calling agent loop
-//! with web search, workers, the audit log and consent. Later milestones add
-//! memory (M4) and the sandbox (M5) — see `docs/arc42-architecture.md`.
+//! Kaeru `agent-core`: the platform-agnostic agent library. Frontends embed
+//! this crate in-process and translate `CoreEvent`s into platform idioms; no
+//! frontend concept (HTTP, HTML, Discord) is allowed in here (C2, ADR-010).
+//! See `docs/arc42-architecture.md` for the milestone roadmap.
 
 pub mod agent;
 pub mod audit;

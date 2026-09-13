@@ -1,14 +1,9 @@
-//! The OpenAI-compatible HTTP adapter — the single place that knows the
-//! provider protocol (ADR-005). Everything downstream sees `CoreEvent`s.
-//!
-//! Robustness rules (Quality Goal 1, "works with any OpenAI-compatible base
-//! URL"):
-//! - an empty `api_key` sends no `Authorization` header (local servers),
-//! - a non-SSE answer (provider ignored `stream: true`) is parsed as a full
-//!   JSON completion and forwarded as one delta,
-//! - the `[DONE]` sentinel *or* a plain stream end both complete the turn,
-//! - malformed SSE payloads are logged and skipped, never fatal,
-//! - provider HTTP errors surface as `CoreEvent::Error` with a mapped kind.
+//! The OpenAI-compatible HTTP adapter, the single place that knows the
+//! provider protocol (ADR-005); everything downstream sees `CoreEvent`s.
+//! Compatibility rules: an empty `api_key` sends no `Authorization` header, a
+//! non-SSE answer is parsed as a full JSON completion, `[DONE]` or a plain
+//! stream end both complete the turn, malformed SSE payloads are logged and
+//! skipped, and HTTP errors surface as `CoreEvent::Error`.
 
 use std::future::Future;
 use std::pin::Pin;

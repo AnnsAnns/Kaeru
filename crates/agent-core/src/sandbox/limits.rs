@@ -1,13 +1,8 @@
-//! Supervisor-imposed resource limits (M5, ADR-012): the rlimits bubblewrap
-//! itself does not provide. Applied with `pre_exec` to the sandbox child
-//! before it execs; the wall-clock timeout lives in `exec.rs`.
-//!
-//! RLIMIT_NPROC is counted **per real user** on Linux (threads included), so
-//! a fixed cap would break as soon as the owner's desktop has more threads
-//! than the cap — and unprivileged user-namespace creation itself fails when
-//! the limit is already exceeded. The cap is therefore computed per run as
-//! *current thread count + a bounded margin*: plenty of room for the sandbox,
-//! while a fork bomb stops after `SANDBOX_NPROC_MARGIN` extra processes.
+//! Supervisor-imposed rlimits (M5, ADR-012), applied with `pre_exec` before
+//! the sandbox child execs; the wall-clock timeout lives in `exec.rs`.
+//! RLIMIT_NPROC counts threads per real user, so the cap is computed per run
+//! as *current thread count + margin*: a fixed cap would break userns
+//! creation on a busy desktop, while a fork bomb still stops at the margin.
 
 use std::process::Command as StdCommand;
 

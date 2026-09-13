@@ -1,16 +1,8 @@
-//! Incremental SSE (Server-Sent Events) parser for provider streams.
-//!
-//! Spec-faithful where it matters, tolerant where providers vary (ADR-005):
-//! - byte-fed, so chunks may split a line anywhere (even inside a UTF-8
-//!   character; lines are only decoded once complete),
-//! - multiple `data:` lines per event join with `\n`,
-//! - comments (`: keep-alive`) and unknown fields (`event:`, `id:`, `retry:`)
-//!   are ignored,
-//! - `\n`, `\r\n` and a lone final line without terminator are accepted,
-//! - a leading UTF-8 BOM is stripped.
-//!
-//! The OpenAI `[DONE]` sentinel is *not* handled here: it is protocol
-//! knowledge and stays with the caller (`llm::client`).
+//! Incremental SSE parser for provider streams (ADR-005): byte-fed (chunks
+//! may split a line mid-UTF-8), multi-`data:` events join with `\n`, comments
+//! and unknown fields are ignored, `\n`/`\r\n`/unterminated final lines are
+//! accepted, a BOM is stripped. The `[DONE]` sentinel is protocol knowledge
+//! and stays with the caller (`llm::client`).
 
 /// Push-based SSE parser: feed raw bytes, receive complete `data:` payloads.
 #[derive(Debug, Default)]

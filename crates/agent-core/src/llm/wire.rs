@@ -303,6 +303,5 @@ pub(crate) struct WireEffortLevel {
     pub value: Option<String>,
 }
 
-
 #[cfg(test)]
 mod tests;

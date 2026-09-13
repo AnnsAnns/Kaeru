@@ -1,12 +1,8 @@
-//! Fake provider + record/replay cassettes (ADR-020).
-//!
-//! - [`Cassette`]: a versioned JSON file of recorded request/response pairs.
-//!   Cassettes double as protocol conformance samples and make the whole
-//!   `cargo test` suite run offline.
-//! - [`FakeProvider`]: replays cassette events for matching requests; falls
-//!   back to a built-in canned response so `--fake` boots the full UI keyless.
-//! - [`RecordingClient`]: decorator over any [`LlmClient`] that appends live
-//!   interactions to a cassette file (`--record`).
+//! Fake provider + record/replay cassettes (ADR-020): [`FakeProvider`]
+//! replays [`Cassette`] events (falling back to a built-in canned response so
+//! `--fake` boots keyless), [`RecordingClient`] decorates any [`LlmClient`]
+//! and appends live interactions to a cassette (`--record`). Everything runs
+//! offline, so the whole test suite needs no network.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

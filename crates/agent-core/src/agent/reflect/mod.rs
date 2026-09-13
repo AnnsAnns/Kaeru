@@ -276,14 +276,10 @@ impl Reflector {
 
         let persona = self.core.persona();
 
-        // Digest every changed conversation, `REFLECT_MAX_CONVERSATIONS` per
-        // worker call. Iterating (rather than taking one capped batch) means
-        // a backlog is never stranded: the state only advances to `now` after
-        // the entire changed set has been digested.
-        //
-        // Worker output is staged before anything is written: a worker failure
-        // halfway through then leaves memory untouched, so a retry starts from
-        // a clean slate instead of duplicating notes that already landed.
+        // Digest in batches of `REFLECT_MAX_CONVERSATIONS`; the state only
+        // advances to `now` after the whole changed set is done. Worker output
+        // is staged before anything is written, so a mid-run failure leaves
+        // memory untouched and a retry starts from a clean slate.
         let mut staged_notes: Vec<ReflectedNote> = Vec::new();
         let mut staged_persona: Option<PersonaRevision> = None;
         let mut digested = 0;

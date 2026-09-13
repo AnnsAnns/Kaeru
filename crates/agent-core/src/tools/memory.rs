@@ -1,9 +1,7 @@
-//! The memory tools (M3 write side, M4 read side).
-//!
-//! Memory survives across sessions, so a silent write is a prompt-injection
-//! vector: `memory_write` always routes through the consent flow (ADR-016) and
-//! the note is auto-tagged/summarized by the tool-free `distiller` worker
-//! (ADR-021). `memory_search` is read-only and therefore safe (ADR-007).
+//! The memory tools (M3 write, M4 read). Memory survives across sessions, so
+//! a silent write is a prompt-injection vector: `memory_write` is always
+//! consent-gated (ADR-016) and the note is tidied by the tool-free `distiller`
+//! worker (ADR-021). `memory_search` is read-only and safe.
 
 use serde_json::{Value, json};
 

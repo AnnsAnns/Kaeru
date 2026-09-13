@@ -1,6 +1,6 @@
-//! Chat types: the core-level request vocabulary and the OpenAI-compatible
-//! wire forms (Appendix A). All provider protocol knowledge lives in `llm/`
-//! (ADR-005); nothing else in the core or frontends may depend on it.
+//! Chat types: the core-level request vocabulary. The OpenAI-compatible wire
+//! forms live in `llm/wire.rs`; all provider protocol knowledge is confined
+//! to `llm/` (ADR-005).
 
 use serde::{Deserialize, Serialize};
 

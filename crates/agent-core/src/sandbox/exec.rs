@@ -1,11 +1,8 @@
 //! Phase B of the Python tool (M5, ADR-012/013): one script run inside a
-//! bubblewrap user namespace — network off by default, the workspace is the
-//! only writable path, the prepared env is read-only, and the supervisor
-//! enforces wall-clock, CPU, memory, process and file-size limits.
-//!
-//! The script is fed to `python -` on stdin: nothing is written into the
-//! workspace on the script's behalf, so artifacts are exactly the files the
-//! script itself produced.
+//! bubblewrap user namespace (network off by default, only the workspace
+//! writable, env read-only, supervised limits). The script is fed to
+//! `python -` on stdin, so artifacts are exactly the files the script itself
+//! produced.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

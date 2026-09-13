@@ -1,16 +1,8 @@
-//! Deterministic context/token budget policy (ADR-018, M2).
-//!
-//! Prompt assembly is a fixed pipeline, never a heuristic:
-//!
-//! 1. system prompt (the owner-written persona, M4.5)
-//! 2. injected memory block (selected durable notes, budgeted, M4)
-//! 3. rolling summary (a system message once the budget was exceeded)
-//! 4. the recent message window
-//!
-//! Overflow is resolved *before* the provider call: the oldest turns fall
-//! out of the window and are folded into the summary by one bounded LLM
-//! sub-call. The turn always answers; a failing summary degrades to a
-//! deterministic excerpt, never to a lost turn.
+//! Deterministic context/token budget policy (ADR-018, M2). Prompt assembly
+//! is a fixed pipeline: persona (M4.5), memory block (M4), rolling summary,
+//! recent window. Overflow is resolved *before* the provider call: the oldest
+//! turns fold into the summary via one bounded LLM sub-call, and a failing
+//! summary degrades to a deterministic excerpt, never to a lost turn.
 
 use crate::events::Usage;
 use crate::llm::{ChatMessage, ChatRequest, LlmClient, Role};
@@ -107,13 +99,10 @@ pub fn assemble(
     messages
 }
 
-/// Re-summarize: fold `dropped` (and the previous summary, if any) into a
-/// new bounded summary with one LLM sub-call.
-///
-/// Never fails: on a provider error, empty output, or a timeout-free stream
-/// end, the summary degrades to a deterministic excerpt of the dropped turns
-/// so the turn still answers. The sub-call's usage is folded into
-/// `usage_out` so it is accounted like any other call.
+/// Fold `dropped` (and the previous summary) into a new bounded summary with
+/// one LLM sub-call. Never fails: on error or empty output the summary
+/// degrades to a deterministic excerpt of the dropped turns. The sub-call's
+/// usage is folded into `usage_out` so it is accounted like any other call.
 pub async fn summarize(
     client: &dyn LlmClient,
     model: &str,

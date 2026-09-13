@@ -103,4 +103,3 @@ async fn threads_keep_independent_histories() {
     assert_eq!(registry.list().unwrap().len(), 2);
     std::fs::remove_dir_all(&dir).ok();
 }
-

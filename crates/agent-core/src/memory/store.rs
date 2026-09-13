@@ -1,10 +1,7 @@
-//! Plain-markdown memory store (M4, ADR-007).
-//!
-//! Notes live under `data/memory/YYYY-MM-DD/{slug}.md`, one file per note,
-//! with a tiny YAML-ish frontmatter (`tags`, `created`) and a Markdown body.
-//! The format is deliberately human-editable: the reader tolerates missing or
-//! broken frontmatter, ignores non-markdown files, and never crashes a turn on
-//! a bad file — it skips it with a warning.
+//! Plain-markdown memory store (M4, ADR-007): one file per note under
+//! `data/memory/YYYY-MM-DD/{slug}.md` with a tiny frontmatter. The format is
+//! deliberately human-editable; the reader tolerates broken files by skipping
+//! them with a warning, never crashing a turn.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,7 +49,9 @@ impl MemoryStore {
     /// Atomic like the other data stores: write `.tmp`, then rename over the
     /// final name, so a crash mid-write never leaves a half-written note.
     pub fn write(&self, content: &str, tags: &[String]) -> Result<PathBuf> {
-        let path = self.day_dir().join(format!("{}.md", self.file_stem(content)));
+        let path = self
+            .day_dir()
+            .join(format!("{}.md", self.file_stem(content)));
         let document = format!(
             "---\ntags: {}\ncreated: {}\n---\n{}\n",
             format_tags(tags),

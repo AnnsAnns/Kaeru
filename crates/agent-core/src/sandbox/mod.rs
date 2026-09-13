@@ -1,17 +1,8 @@
-//! The Python sandbox (M5): a two-phase supervisor around `uv` and
-//! `bubblewrap` (ADR-012/013).
-//!
-//! - **Phase A** ([`envprep`]) prepares an ephemeral uv environment for a
-//!   requested dependency set. It is the only phase with network access and
-//!   runs only after `PackageInstall` consent.
-//! - **Phase B** ([`exec`]) runs one script inside a bubblewrap user
-//!   namespace: no network by default, the workspace is the only writable
-//!   path, the prepared env is read-only, and the supervisor enforces
-//!   wall-clock, CPU, memory, process and file-size limits.
-//!
-//! The host check fails closed at startup (C11): Linux with unprivileged
-//! user namespaces and `bwrap` + `uv` on PATH are required before the
-//! frontend serves anything.
+//! The Python sandbox (M5, ADR-012/013): [`envprep`] prepares a uv
+//! environment (the only networked phase, consent-gated), [`exec`] runs one
+//! script under `bwrap` with no network, a writable workspace only, and
+//! wall-clock/CPU/memory/process limits. The host check fails closed at
+//! startup (C11) when `bwrap`/`uv` or userns support are missing.
 
 pub mod envprep;
 pub mod exec;

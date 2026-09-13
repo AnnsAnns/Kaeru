@@ -105,8 +105,7 @@ fn artifacts_round_trip_with_camel_case_mime_hints() {
             .with_artifacts(vec![Artifact::new("photo.png", Some("image/png"))]),
     );
     conversation.messages[1] = StoredMessage::from(
-        &ChatMessage::assistant("done")
-            .with_artifacts(vec![Artifact::new("rotated.png", None)]),
+        &ChatMessage::assistant("done").with_artifacts(vec![Artifact::new("rotated.png", None)]),
     );
     store.save(&conversation).unwrap();
 

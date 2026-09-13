@@ -30,13 +30,8 @@ pub(super) struct Reflection {
     pub(super) notes: Vec<ReflectedNote>,
     pub(super) persona: Option<PersonaRevision>,
 }
-/// Parse the reflector's output into durable notes plus an optional persona
-/// revision.
-///
-/// Notes are segments separated by a line of `===`, each in the distiller's
-/// lenient `tags\n---\nbody` shape. The optional persona block is fenced by
-/// `===PERSONA===` and `===END===`; inside, the lines before the first `---`
-/// are `WHY:`/`HOW:` metadata and the rest is the complete revised persona.
+/// Split the reflector's output into durable notes plus the optional persona
+/// block (the module docs describe the shapes).
 pub(super) fn parse_reflection(text: &str) -> Reflection {
     let mut reflection = Reflection::default();
     let mut segment: Vec<&str> = Vec::new();

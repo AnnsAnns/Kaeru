@@ -6,9 +6,9 @@
 
 mod approvals;
 mod registry;
-mod turn;
 #[cfg(test)]
 mod tests;
+mod turn;
 
 pub use registry::{ConversationRegistry, ThreadSummary};
 pub use turn::TurnHandle;
@@ -435,11 +435,8 @@ impl SessionInner {
 
     /// Write the conversation back to the store (when there is one). Never
     /// fails a turn: persistence errors are logged and the state stays in
-    /// memory (quality goal: completed turns are not lost *by the store*).
-    ///
-    /// The store write is synchronous and runs under the session lock; at
-    /// personal scale (one small JSON file per finalized turn) that is
-    /// deliberate — see arc42 §11 for the tradeoff and its revisit trigger.
+    /// memory. The synchronous write runs under the session lock — deliberate
+    /// at personal scale, see arc42 §11.
     fn persist(&self) {
         let Some(store) = &self.store else {
             return;

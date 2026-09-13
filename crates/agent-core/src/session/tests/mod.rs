@@ -839,9 +839,11 @@ async fn attachments_and_artifacts_persist_with_their_messages() {
         )
         .unwrap();
     let events = drain(handle.into_events()).await;
-    assert!(events.iter().any(
-        |event| matches!(event, CoreEvent::Artifact { path, .. } if path == "rotated.png")
-    ));
+    assert!(
+        events.iter().any(
+            |event| matches!(event, CoreEvent::Artifact { path, .. } if path == "rotated.png")
+        )
+    );
 
     // The upload rides on the user message; the tool output lands on the
     // final answer (the intermediate message only carries the tool call).

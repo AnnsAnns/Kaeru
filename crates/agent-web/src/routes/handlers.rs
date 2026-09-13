@@ -1,15 +1,18 @@
 //! The `/api/*` handlers: chat/turn SSE, consent, threads, memory, reflection.
 
 use agent_core::ChatSession;
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 
 use crate::{bridge, error};
 
-use super::{AppState, ApprovalBody, ChatBody, MemoryQuery, ThreadQuery, resolve_existing, resolve_thread, thread_error};
+use super::{
+    AppState, ApprovalBody, ChatBody, MemoryQuery, ThreadQuery, resolve_existing, resolve_thread,
+    thread_error,
+};
 
 fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
     let id = session.conversation_id();
@@ -48,7 +51,10 @@ fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value 
 }
 /* ---------- handlers ---------- */
 
-pub(super) async fn post_chat(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Response {
+pub(super) async fn post_chat(
+    State(state): State<AppState>,
+    Json(body): Json<ChatBody>,
+) -> Response {
     if body.message.trim().is_empty() {
         return error::json_error(
             StatusCode::BAD_REQUEST,
@@ -81,10 +87,8 @@ pub(super) async fn post_chat(State(state): State<AppState>, Json(body): Json<Ch
 
 /// Validate the chat's attachment paths against the workspace (M5): each must
 /// be a single-component upload that exists, so a stored message can never
-/// name something the file routes would refuse to serve.
-///
-/// The error is boxed (like [`resolve_thread`]'s) because `Response` is large
-/// enough to trip clippy's `result_large_err`; only the error path pays.
+/// name something the file routes would refuse to serve. The error is boxed
+/// for clippy's `result_large_err`, like [`resolve_thread`].
 fn attachments_for(
     state: &AppState,
     paths: &[String],
@@ -118,7 +122,10 @@ fn attachments_for(
     Ok(attachments)
 }
 
-pub(super) async fn post_abort(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+pub(super) async fn post_abort(
+    State(state): State<AppState>,
+    Query(query): Query<ThreadQuery>,
+) -> Response {
     let session = match resolve_existing(&state, query.thread.as_deref()) {
         Ok(session) => session,
         Err(response) => return *response,
@@ -151,7 +158,10 @@ pub(super) async fn post_regenerate(
 
 /// Re-attach to a thread's active turn: replays the buffered events then
 /// streams live (M3, §6.3a). 204 when the thread has no active turn.
-pub(super) async fn get_stream(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+pub(super) async fn get_stream(
+    State(state): State<AppState>,
+    Query(query): Query<ThreadQuery>,
+) -> Response {
     let session = match resolve_existing(&state, query.thread.as_deref()) {
         Ok(session) => session,
         Err(response) => return *response,
@@ -164,7 +174,10 @@ pub(super) async fn get_stream(State(state): State<AppState>, Query(query): Quer
 
 /// Resolve a pending consent card (M3). Unknown ids (already resolved or
 /// timed out) are a plain 404.
-pub(super) async fn post_approval(State(state): State<AppState>, Json(body): Json<ApprovalBody>) -> Response {
+pub(super) async fn post_approval(
+    State(state): State<AppState>,
+    Json(body): Json<ApprovalBody>,
+) -> Response {
     let session = match resolve_existing(&state, body.thread.as_deref()) {
         Ok(session) => session,
         Err(response) => return *response,
@@ -189,7 +202,10 @@ pub(super) async fn get_models(State(state): State<AppState>) -> Response {
     }
 }
 
-pub(super) async fn get_session(State(state): State<AppState>, Query(query): Query<ThreadQuery>) -> Response {
+pub(super) async fn get_session(
+    State(state): State<AppState>,
+    Query(query): Query<ThreadQuery>,
+) -> Response {
     // M2 compatibility alias: reload/restore payload for one thread.
     match resolve_thread(&state, query.thread.as_deref()) {
         Ok(session) => Json(thread_payload(&state, &session)).into_response(),
@@ -222,7 +238,10 @@ pub(super) async fn get_thread(State(state): State<AppState>, Path(id): Path<Str
     }
 }
 
-pub(super) async fn delete_thread(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub(super) async fn delete_thread(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
     match state.registry.delete(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => thread_error(&err),
@@ -232,7 +251,10 @@ pub(super) async fn delete_thread(State(state): State<AppState>, Path(id): Path<
 /// The memory browser (M4): durable notes, newest first, optionally filtered
 /// by a free-text `?q=`. Read-only; writes still go through the consent-gated
 /// `memory_write` tool.
-pub(super) async fn list_memory(State(state): State<AppState>, Query(query): Query<MemoryQuery>) -> Response {
+pub(super) async fn list_memory(
+    State(state): State<AppState>,
+    Query(query): Query<MemoryQuery>,
+) -> Response {
     let Some(store) = state.core.memory() else {
         return Json(json!({ "configured": false, "count": 0, "notes": [] })).into_response();
     };

@@ -1,14 +1,8 @@
-//! The authenticated workspace file flow (M5, §6.3b / ADR-017).
-//!
-//! `POST /api/files?name=…` lands an upload in the sandbox workspace (the one
-//! writable folder); `GET /api/files/{path}` serves workspace files with MIME
-//! detection and path sanitization (no traversal, no symlink escape — the
-//! shared rules live in `agent_core::sandbox::workspace`). Images render
-//! inline; everything else downloads as an attachment.
-//!
-//! The routes sit under `/api`, so they inherit the `X-Auth-Token` check when
-//! one is configured. The UI fetches with the header and turns responses into
-//! blob URLs because an `<img>` tag cannot carry a custom header.
+//! The authenticated workspace file flow (M5, ADR-017): uploads land in the
+//! sandbox workspace; `GET /api/files/{path}` serves them with traversal and
+//! symlink protection (shared rules in `agent_core::sandbox::workspace`).
+//! Images render inline, everything else downloads. The UI fetches with the
+//! auth header and uses blob URLs (an `<img>` tag cannot carry a header).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

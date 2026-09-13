@@ -1,13 +1,7 @@
-//! Kaeru `agent-web`: the first frontend (C7: binds 127.0.0.1 only).
-//!
-//! Thin platform adapter: CLI + config + `AgentCore` + axum router. All logic
-//! lives in `agent-core` (C2/ADR-010).
-//!
-//! Modes:
-//! - (default)  live proxy to the configured OpenAI-compatible provider
-//! - `--fake`   keyless UI on the fake provider (cassette `data/cassette.json`
-//!   when present, built-in canned responses otherwise)
-//! - `--record` live, and appends every interaction to the cassette file
+//! Kaeru `agent-web`: a thin axum adapter over `agent-core` (C2/ADR-010;
+//! binds 127.0.0.1 only, C7). Modes: live (default), `--fake` (keyless UI on
+//! the cassette/built-in fake provider), `--record` (live + appends every
+//! interaction to the cassette file).
 
 mod assets;
 mod bridge;

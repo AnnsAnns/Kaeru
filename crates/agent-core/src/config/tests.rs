@@ -64,8 +64,7 @@ fn context_budget_is_configurable_with_a_default() {
     let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
     assert_eq!(config.context.max_prompt_tokens, DEFAULT_MAX_PROMPT_TOKENS);
     let config =
-        Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 100\n")
-            .unwrap();
+        Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 100\n").unwrap();
     assert_eq!(config.context.max_prompt_tokens, 100);
 }
 

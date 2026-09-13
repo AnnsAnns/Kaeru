@@ -66,11 +66,9 @@ impl Emitter {
 }
 
 /// Wrap untrusted content as explicit data, not instructions (ADR-016).
-///
-/// Any embedded closing delimiter is neutralized so content cannot break out
-/// of the fence, and the `source` is made attribute-safe (a thread title may
-/// contain quotes or angle brackets); the trailing note tells the model how
-/// to treat the block.
+/// Embedded closing delimiters are neutralized so content cannot break out of
+/// the fence, and `source` is made attribute-safe (titles may contain quotes
+/// or angle brackets).
 pub fn fence(source: &str, content: &str) -> String {
     let source: String = source
         .chars()

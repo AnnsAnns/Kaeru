@@ -231,13 +231,10 @@ impl Config {
         }
     }
 
-    /// Write the documented default config file (creating parent
-    /// directories), 0600 on unix.
-    ///
-    /// This writes [`DEFAULT_CONFIG_TOML`], the commented first-boot template,
-    /// not the receiver: it is the missing-file branch of [`Config::load`]. Use
-    /// `toml::to_string` at the call site if an edited config must be
-    /// persisted instead.
+    /// Write the documented default config file (`DEFAULT_CONFIG_TOML`, the
+    /// commented first-boot template), creating parent dirs, 0600 on unix.
+    /// This is the missing-file branch of [`Config::load`]; use
+    /// `toml::to_string` instead when an edited config must be persisted.
     pub fn write_default(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {

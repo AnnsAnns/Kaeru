@@ -1,10 +1,7 @@
-//! Schema-versioned conversation persistence (M2, §5.4 / §8 "Persistence").
-//!
-//! One JSON file per conversation under `data/conversations/{id}.json`:
-//! plain files, atomic writes (tmp + rename), a `schema` version with a
-//! migration hook. Unreadable or unknown-schema files are **quarantined**
-//! (renamed aside) with a warning — a broken file never crashes a turn; the
-//! session just starts empty.
+//! Schema-versioned conversation persistence (M2): one JSON file per
+//! conversation under `data/conversations/{id}.json`, atomic writes, a
+//! `schema` version with migration hooks. Unreadable or unknown-schema files
+//! are quarantined aside with a warning; a broken file never crashes a turn.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

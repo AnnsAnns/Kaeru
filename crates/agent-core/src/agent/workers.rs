@@ -1,10 +1,8 @@
-//! Concern-separated, tool-free worker LLM calls (M3, ADR-021).
-//!
-//! A worker is a plain LLM sub-call with its own model and system prompt. It
-//! **never receives tools** (C16), so injected instructions inside the raw
-//! content it reads have nothing to steer; its output is bounded and re-fenced
-//! as data before the main model sees it. Raw fetched web pages are only ever
-//! read by a worker — the main model never sees them.
+//! Concern-separated, tool-free worker LLM calls (M3, ADR-021): a plain
+//! sub-call with its own model and system prompt. Workers **never receive
+//! tools** (C16), so injected instructions in the content they read have
+//! nothing to steer; output is bounded and re-fenced as data before the main
+//! model sees it.
 
 use std::sync::Arc;
 use std::time::Instant;

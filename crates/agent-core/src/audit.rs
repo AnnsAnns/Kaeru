@@ -1,9 +1,6 @@
-//! Append-only audit log (M3, ADR-019).
-//!
-//! Every tool execution and consent decision appends one JSON line to
-//! `data/audit.jsonl`: turn id, tool, input, decision, exit status, duration
-//! (and the worker model for worker calls). Frontends ignore it; the owner
-//! greps it. Writes never fail a turn — an I/O error is logged and dropped.
+//! Append-only audit log (M3, ADR-019): every tool execution and consent
+//! decision appends one JSON line to `data/audit.jsonl`. Writes never fail a
+//! turn; an I/O error is logged and dropped.
 
 use std::io::Write;
 use std::path::PathBuf;

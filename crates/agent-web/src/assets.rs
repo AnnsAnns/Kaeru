@@ -1,11 +1,6 @@
-//! Embedded static assets (C13: single binary).
-//!
-//! `index.html`, `app.js`, `app.css` and the self-hosted Bort fonts are
-//! compiled into the binary via rust-embed — no build step, no Node. Assistant
-//! Markdown is rendered to sanitized HTML on the server (`markdown.rs`,
-//! ADR-026), so the client never parses Markdown. The design language (tokens,
-//! box recipe, fonts) is a hand-ported snapshot of the owner's blog — see
-//! arc42 Appendix E; the `Bort/` folder itself is never imported (C17).
+//! Embedded static assets (C13: single binary, no build step). The design
+//! language is a hand-ported snapshot of the owner's blog (arc42 Appendix E);
+//! the `Bort/` folder itself is never imported (C17).
 
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};

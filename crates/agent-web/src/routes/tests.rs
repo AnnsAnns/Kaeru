@@ -1,9 +1,9 @@
 use super::*;
-use serde_json::json;
 use agent_core::{Config, FakeProvider};
 use axum::body::Body;
 use axum::http::header::{HeaderMap, HeaderName, HeaderValue};
 use http_body_util::BodyExt;
+use serde_json::json;
 use tower::util::ServiceExt;
 
 fn state_with_token(token: Option<&str>) -> AppState {
@@ -472,8 +472,7 @@ async fn threads_can_be_created_listed_fetched_and_deleted() {
     assert_eq!(threads[0]["id"], id);
     assert_eq!(threads[0]["messageCount"], 0);
 
-    let (status, json, _) =
-        get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
+    let (status, json, _) = get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["id"], id);
 
@@ -486,8 +485,7 @@ async fn threads_can_be_created_listed_fetched_and_deleted() {
     )
     .await;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
-    let (status, _, _) =
-        get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
+    let (status, _, _) = get_json(&state, &format!("/api/threads/{id}"), HeaderMap::new()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -695,8 +693,7 @@ async fn traversal_and_absolute_paths_are_forbidden() {
 async fn symlinks_out_of_the_workspace_are_forbidden() {
     let state = AppState::fake();
     let workspace = state.files.as_ref().unwrap().workspace.clone();
-    let outside =
-        std::env::temp_dir().join(format!("kaeru-web-outside-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!("kaeru-web-outside-{}", std::process::id()));
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("secret.txt"), b"no").unwrap();
     std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("link.txt")).unwrap();

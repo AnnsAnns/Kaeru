@@ -1,15 +1,7 @@
-//! Small Markdown abstraction for the web frontend (M2.5, ADR-026).
-//!
-//! Assistant replies are Markdown; this module is the *only* place that knows
-//! how to turn them into HTML. Everything else calls [`render`]. Swapping the
-//! renderer means rewriting this one file — the routes and the client never
-//! depend on the parser.
-//!
-//! Safety is structural, not a post-pass: we walk the parser's events and emit
-//! HTML for an explicit allow-list of constructs, so raw HTML, event handlers
-//! and dangerous link schemes are never emitted in the first place (the API
-//! therefore only ever ships sanitized HTML). Parsing lives here, in
-//! `agent-web`; `agent-core` never sees HTML (C2).
+//! Markdown rendering for the web frontend (M2.5, ADR-026): the *only* place
+//! that turns assistant Markdown into HTML. Safety is structural: we walk the
+//! parser's events and emit an explicit allow-list, so raw HTML and dangerous
+//! link schemes are never emitted. `agent-core` never sees HTML (C2).
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 

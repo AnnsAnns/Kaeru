@@ -1,9 +1,7 @@
 //! Phase A of the Python tool (M5, ADR-013): prepare an ephemeral uv
-//! environment for a requested dependency set. This is the **only** phase
-//! that touches the network, and it runs only after explicit
-//! `PackageInstall` consent. Prepared environments are keyed by a stable hash
-//! of the normalized dependency set and reused, so a cached dep set never
-//! asks again; execution mounts them read-only (`exec.rs`).
+//! environment for a dependency set. This is the **only** networked phase and
+//! runs only after `PackageInstall` consent. Envs are keyed by a stable hash
+//! of the normalized dep set and reused, so a cached set never asks again.
 
 use std::ffi::OsString;
 use std::path::Path;

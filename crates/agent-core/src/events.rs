@@ -1,9 +1,7 @@
-//! Wire-serializable core event stream (ADR-010/011/015).
-//!
-//! Every frontend programs against this normalized event vocabulary. The enum
-//! is complete from M1 on but variants arrive progressively: M1 uses
-//! `Delta`/`TurnDone`/`Error`; `ToolCall`/`ToolResult` and `ApprovalRequest`
-//! come with the agent loop (M3), `Artifact` with files (M5).
+//! Wire-serializable core event stream (ADR-010/011/015): the normalized
+//! vocabulary every frontend translates. The enum is complete from M1 on, but
+//! variants arrive progressively (tool calls and consent with M3, artifacts
+//! with M5) — do not add protocol fields early.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,17 +16,13 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::error::ApiErrorKind;
 
-/// A subscription of `CoreEvent`s with bounded replay (ADR-015).
-///
-/// M3 completes the turn executor: a reconnect replays the events buffered so
-/// far for the active turn, then follows live. A stream with no live source
-/// and no buffered events is already closed (`RecvError::Closed`).
+/// A subscription of `CoreEvent`s with bounded replay (ADR-015): a reconnect
+/// replays the buffered events of the active turn, then follows live. With no
+/// live source and no buffer the stream is already closed.
 ///
 /// The live half is a [`BroadcastStream`], not a bare `broadcast::Receiver`:
-/// its `recv` future is kept alive across polls (inside a reusable box), so a
-/// send still wakes the task. A hand-rolled `poll_next` that creates and drops
-/// `rx.recv()` on every poll would unregister the broadcast waiter and stall
-/// the stream until the next unrelated wake-up (e.g. an SSE keep-alive tick).
+/// creating and dropping `rx.recv()` on every `poll_next` would unregister
+/// the broadcast waiter and stall the stream until an unrelated wake-up.
 pub struct EventStream {
     replay: std::vec::IntoIter<CoreEvent>,
     live: Option<BroadcastStream<CoreEvent>>,

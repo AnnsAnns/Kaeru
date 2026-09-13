@@ -31,17 +31,11 @@ pub struct ThreadSummary {
     pub usage: Usage,
 }
 
-/// Platform-agnostic cache of live sessions over the plain-file store
-/// (M2.5, §5.5 / ADR-024).
-///
-/// The UI calls conversations *threads*; the core keeps the term
-/// *conversation*. One `Arc<ChatSession>` is cached per conversation id and
-/// lazily loaded from disk, so an in-flight turn stays reachable across HTTP
-/// requests. Storage stays the source of truth: a restart rebuilds every
-/// thread from `data/conversations/`.
-///
-/// Entries live for the process lifetime (no eviction); deliberate at personal
-/// scale — see arc42 §11 for the tradeoff and its revisit trigger.
+/// Cache of live sessions over the plain-file store (M2.5, ADR-024). One
+/// `Arc<ChatSession>` per conversation id, lazily loaded, so an in-flight
+/// turn stays reachable across HTTP requests; the store stays the source of
+/// truth. Entries live for the process lifetime (no eviction) — deliberate
+/// at personal scale, see arc42 §11.
 pub struct ConversationRegistry {
     core: Arc<AgentCore>,
     store: ConversationStore,

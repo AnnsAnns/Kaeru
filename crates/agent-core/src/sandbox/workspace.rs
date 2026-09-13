@@ -40,13 +40,10 @@ pub fn safe_file_name(name: &str) -> Result<String> {
     Ok(name.to_owned())
 }
 
-/// Resolve a workspace-relative path for serving. Every component must be
-/// ordinary, and the canonical result must stay inside the canonical
-/// workspace, so neither `..` nor a symlink can escape (M5, ADR-017).
-///
-/// Errors: `Config` for malformed input, `Forbidden` for traversal/symlink
-/// escapes, `NotFound` for missing files, `Internal` when the workspace
-/// itself is unusable.
+/// Resolve a workspace-relative path for serving (M5, ADR-017). Every
+/// component must be ordinary and the canonical result must stay inside the
+/// workspace, so neither `..` nor a symlink can escape. Errors: `Config` for
+/// malformed input, `Forbidden` for escapes, `NotFound` for missing files.
 pub fn resolve_workspace_file(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
         return Err(ApiError::config("a file path is required"));

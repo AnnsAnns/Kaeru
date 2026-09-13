@@ -80,16 +80,16 @@ fn tolerates_null_and_missing_content() {
     .unwrap();
     assert_eq!(chunk.choices[0].delta.content, None);
 
-    let chunk: WireChunk =
-        serde_json::from_str(r#"{"choices":[{"index":0,"delta":{}}]}"#).unwrap();
+    let chunk: WireChunk = serde_json::from_str(r#"{"choices":[{"index":0,"delta":{}}]}"#).unwrap();
     assert_eq!(chunk.choices[0].delta.content, None);
 }
 
 #[test]
 fn parses_usage_only_final_chunk() {
-    let chunk: WireChunk =
-        serde_json::from_str(r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#)
-            .unwrap();
+    let chunk: WireChunk = serde_json::from_str(
+        r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#,
+    )
+    .unwrap();
     let usage = Usage::from(chunk.usage.unwrap());
     assert_eq!(
         usage,
@@ -186,8 +186,7 @@ fn streaming_request_carries_reasoning_effort() {
 #[test]
 fn parses_reasoning_delta_chunk() {
     let chunk: WireChunk =
-        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"We need"}}]}"#)
-            .unwrap();
+        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"We need"}}]}"#).unwrap();
     assert_eq!(chunk.choices[0].delta.reasoning_text(), Some("We need"));
     assert_eq!(chunk.choices[0].delta.content, None);
 

@@ -1,13 +1,9 @@
-//! The `python` tool (M5): run a Python script in the bubblewrap sandbox
-//! (ADR-012/013). Dependency-free scripts are `Safe`; a dep set that is not
-//! prepared yet asks for `PackageInstall` consent (Phase A, the only network
-//! access), and any request for network-enabled execution escalates to
-//! `NetworkAccess` — the only consent that ever grants network. The run
-//! itself (Phase B) is offline, workspace-only and supervised.
-//!
-//! Files the script creates or rewrites in the workspace are surfaced as
-//! `Artifact` events (M5, ADR-017), so every frontend can render or download
-//! them.
+//! The `python` tool (M5, ADR-012/013): run a script in the bubblewrap
+//! sandbox. Dependency-free scripts are `Safe`; unprepared deps ask for
+//! `PackageInstall` consent (the only networked phase), and asking for
+//! network escalates to `NetworkAccess`, the only consent that ever grants
+//! it. Workspace files a script creates surface as `Artifact` events
+//! (ADR-017).
 
 use std::collections::HashMap;
 use std::sync::Arc;

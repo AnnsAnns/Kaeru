@@ -1,9 +1,6 @@
-//! Error taxonomy shared by the core library and every frontend.
-//!
-//! One `ApiErrorKind` vocabulary covers configuration problems, provider
-//! failures and lifecycle outcomes; frontends map it to platform idioms
-//! (HTTP status codes, Discord messages, ...). `CoreEvent::Error` carries the
-//! same kind so every frontend renders identical error semantics.
+//! Error taxonomy shared by the core and every frontend: one `ApiErrorKind`
+//! vocabulary, mapped by frontends to platform idioms (HTTP status codes,
+//! ...). `CoreEvent::Error` carries the same kind.
 
 use serde::{Deserialize, Serialize};
 

@@ -155,51 +155,51 @@ try:
 except Exception:
     print('read-only')
 "#,
-            path = shared.display()
-        );
-        let outcome = sandbox.run_script(&script, &[], false).await.unwrap();
-        assert!(outcome.stdout.contains("hello-read-path"), "{outcome:?}");
-        assert!(!outcome.stdout.contains("WROTE-READ-PATH"), "{outcome:?}");
-        assert!(outcome.stdout.contains("read-only"), "{outcome:?}");
-        assert_eq!(
-            std::fs::read_to_string(shared.join("notes.txt")).unwrap(),
-            "hello-read-path",
-            "the host copy is untouched"
-        );
-    }
+        path = shared.display()
+    );
+    let outcome = sandbox.run_script(&script, &[], false).await.unwrap();
+    assert!(outcome.stdout.contains("hello-read-path"), "{outcome:?}");
+    assert!(!outcome.stdout.contains("WROTE-READ-PATH"), "{outcome:?}");
+    assert!(outcome.stdout.contains("read-only"), "{outcome:?}");
+    assert_eq!(
+        std::fs::read_to_string(shared.join("notes.txt")).unwrap(),
+        "hello-read-path",
+        "the host copy is untouched"
+    );
+}
 
-    #[tokio::test]
-    async fn the_memory_limit_stops_an_allocation() {
-        let sandbox = sandbox_with("memory", 20, 128);
-        if !usable(&sandbox) {
-            return;
-        }
-        let outcome = sandbox
-            .run_script(
-                "x = bytearray(400 * 1024 * 1024)\nprint('ALLOCATED')\n",
-                &[],
-                false,
-            )
-            .await
-            .unwrap();
-        assert!(!outcome.success(), "{outcome:?}");
-        assert!(!outcome.stdout.contains("ALLOCATED"), "{outcome:?}");
+#[tokio::test]
+async fn the_memory_limit_stops_an_allocation() {
+    let sandbox = sandbox_with("memory", 20, 128);
+    if !usable(&sandbox) {
+        return;
     }
+    let outcome = sandbox
+        .run_script(
+            "x = bytearray(400 * 1024 * 1024)\nprint('ALLOCATED')\n",
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(!outcome.success(), "{outcome:?}");
+    assert!(!outcome.stdout.contains("ALLOCATED"), "{outcome:?}");
+}
 
-    #[test]
-    fn snapshot_lists_files_relative_and_skips_internal_names() {
-        let sandbox = sandbox("snapshot");
-        std::fs::write(sandbox.workspace().join("plot.png"), b"png").unwrap();
-        std::fs::create_dir_all(sandbox.workspace().join("sub")).unwrap();
-        std::fs::write(sandbox.workspace().join("sub/data.csv"), b"a,b").unwrap();
-        std::fs::write(sandbox.workspace().join(".hidden"), b"x").unwrap();
-        std::fs::create_dir_all(sandbox.workspace().join("__pycache__")).unwrap();
-        std::fs::write(sandbox.workspace().join("__pycache__/m.pyc"), b"x").unwrap();
+#[test]
+fn snapshot_lists_files_relative_and_skips_internal_names() {
+    let sandbox = sandbox("snapshot");
+    std::fs::write(sandbox.workspace().join("plot.png"), b"png").unwrap();
+    std::fs::create_dir_all(sandbox.workspace().join("sub")).unwrap();
+    std::fs::write(sandbox.workspace().join("sub/data.csv"), b"a,b").unwrap();
+    std::fs::write(sandbox.workspace().join(".hidden"), b"x").unwrap();
+    std::fs::create_dir_all(sandbox.workspace().join("__pycache__")).unwrap();
+    std::fs::write(sandbox.workspace().join("__pycache__/m.pyc"), b"x").unwrap();
 
-        let paths: Vec<String> = sandbox
-            .snapshot()
-            .into_iter()
-            .map(|stamp| stamp.path)
-            .collect();
-        assert_eq!(paths, vec!["plot.png", "sub/data.csv"]);
-    }
+    let paths: Vec<String> = sandbox
+        .snapshot()
+        .into_iter()
+        .map(|stamp| stamp.path)
+        .collect();
+    assert_eq!(paths, vec!["plot.png", "sub/data.csv"]);
+}

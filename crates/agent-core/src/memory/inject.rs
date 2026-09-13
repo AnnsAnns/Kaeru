@@ -1,10 +1,7 @@
-//! Budgeted memory injection (M4, ADR-007/ADR-018).
-//!
-//! Before a turn runs, the most relevant durable notes are selected, formatted
-//! as one system block, and inserted between the system prompt and the rolling
-//! summary — the fixed order of ADR-018. Selection is deterministic (term
-//! overlap, then recency) and the block is bounded, so memory can never crowd
-//! out the conversation window.
+//! Budgeted memory injection (M4, ADR-007/018): before a turn, the most
+//! relevant notes are formatted as one bounded system block (deterministic
+//! selection: term overlap, then recency) so memory can never crowd out the
+//! conversation window.
 
 use super::{query_terms, score_note};
 use crate::memory::store::{MemoryNote, MemoryStore};

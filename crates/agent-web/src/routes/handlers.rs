@@ -11,7 +11,7 @@ use crate::{bridge, error};
 
 use super::{
     AppState, ApprovalBody, ChatBody, MemoryQuery, ThreadQuery, TodoCreateBody, TodoItemCreateBody,
-    TodoItemPatchBody, TodoRenameBody, resolve_existing, resolve_thread, thread_error, todo_error,
+    TodoItemPatchBody, TodoRenameBody, lookup_error, resolve_existing, resolve_thread,
 };
 
 fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
@@ -191,7 +191,7 @@ pub(super) async fn post_approval(
     };
     match session.approve(&body.id, body.decision) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => thread_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -234,7 +234,7 @@ pub(super) async fn create_thread(State(state): State<AppState>) -> Response {
 pub(super) async fn get_thread(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.registry.get(&id) {
         Ok(session) => Json(thread_payload(&state, &session)).into_response(),
-        Err(err) => thread_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -244,7 +244,7 @@ pub(super) async fn delete_thread(
 ) -> Response {
     match state.registry.delete(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => thread_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -334,7 +334,7 @@ pub(super) async fn create_todo(
     };
     match store.create(&body.title) {
         Ok(list) => (StatusCode::CREATED, Json(list)).into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -359,7 +359,7 @@ pub(super) async fn delete_todo(
     };
     match store.delete(&slug) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -373,7 +373,7 @@ pub(super) async fn add_todo_item(
     };
     match store.add_item(&slug, &body.text) {
         Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -394,7 +394,7 @@ pub(super) async fn patch_todo_item(
     }
     match store.update_item(&slug, &id, body.text.as_deref(), body.done) {
         Ok(item) => Json(item).into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -407,7 +407,7 @@ pub(super) async fn delete_todo_item(
     };
     match store.remove_item(&slug, &id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 
@@ -421,7 +421,7 @@ fn todo_list_response(
     };
     match call(store) {
         Ok(list) => Json(list).into_response(),
-        Err(err) => todo_error(&err),
+        Err(err) => lookup_error(&err),
     }
 }
 

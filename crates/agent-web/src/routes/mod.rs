@@ -251,19 +251,10 @@ struct TodoItemPatchBody {
     #[serde(default)]
     done: Option<bool>,
 }
-/// Map a core error to HTTP, honoring an explicit thread lookup: a missing
-/// thread is a plain 404 (a client mistake), unlike the provider-flavored
-/// `NotFound` that becomes a gateway error.
-fn thread_error(err: &agent_core::ApiError) -> Response {
-    if err.kind == agent_core::ApiErrorKind::NotFound {
-        error::json_error(StatusCode::NOT_FOUND, "not_found", err.message.clone())
-    } else {
-        error::api_error(err)
-    }
-}
-
-/// Same idea for TODO lookups (M7): a missing list or item is a plain 404.
-fn todo_error(err: &agent_core::ApiError) -> Response {
+/// Map a core error to HTTP, honoring an explicit lookup: a missing thread,
+/// list or item is a plain 404 (a client mistake), unlike the
+/// provider-flavored `NotFound` that becomes a gateway error.
+fn lookup_error(err: &agent_core::ApiError) -> Response {
     if err.kind == agent_core::ApiErrorKind::NotFound {
         error::json_error(StatusCode::NOT_FOUND, "not_found", err.message.clone())
     } else {
@@ -284,7 +275,7 @@ fn resolve_thread(
         Some(id) => state
             .registry
             .get(id)
-            .map_err(|e| Box::new(thread_error(&e))),
+            .map_err(|e| Box::new(lookup_error(&e))),
         None => match state.registry.latest() {
             Ok(Some(session)) => Ok(session),
             Ok(None) => state
@@ -307,7 +298,7 @@ fn resolve_existing(
             .registry
             .get(id)
             .map(Some)
-            .map_err(|e| Box::new(thread_error(&e))),
+            .map_err(|e| Box::new(lookup_error(&e))),
         None => state
             .registry
             .latest()

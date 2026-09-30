@@ -447,8 +447,14 @@ body {
   padding-top: 8px;
   flex: 1;
 }
+/* The action buttons keep their size; the textarea gives up space first, so a
+   narrow composer shrinks the input instead of clipping the send button. */
+.composer-row .action-btn {
+  flex: 0 0 auto;
+}
 #composer {
   flex: 1;
+  min-width: 0;
   resize: none;
   border: none;
   outline: none;

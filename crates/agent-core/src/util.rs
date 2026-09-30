@@ -5,7 +5,9 @@ use std::path::Path;
 
 use crate::error::{ApiError, Result};
 
-/// Deterministic token estimate: ~4 characters per token (ADR-018).
+/// Deterministic token estimate: ~4 bytes per token (ADR-018). Counting bytes
+/// rather than chars keeps non-ASCII text (multi-byte UTF-8, where real
+/// tokenizers also spend roughly a token per char) from being underestimated.
 /// Deliberately crude and stable — the budget governs shape, not billing.
 pub(crate) const CHARS_PER_TOKEN: u64 = 4;
 

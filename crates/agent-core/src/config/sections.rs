@@ -60,7 +60,7 @@ fn default_search_results() -> usize {
 }
 
 /// Web-search configuration (M3). `provider` selects the backend; an unknown
-/// value is normalized to `off` by `Config::validate`.
+/// value falls back to `off` in [`SearchProviderKind::parse`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchConfig {

@@ -61,6 +61,11 @@ fn context_budget_is_configurable_with_a_default() {
     let config =
         Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 100\n").unwrap();
     assert_eq!(config.context.max_prompt_tokens, 100);
+    // Zero means "unset", like every other numeric knob: a literal 0 would
+    // otherwise collapse the window to the last message every turn.
+    let config =
+        Config::parse("[provider]\nmodel = \"m\"\n[context]\nmax_prompt_tokens = 0\n").unwrap();
+    assert_eq!(config.context.max_prompt_tokens, DEFAULT_MAX_PROMPT_TOKENS);
 }
 
 #[test]

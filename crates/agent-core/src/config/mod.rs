@@ -296,17 +296,23 @@ impl Config {
         if config.search.max_results == 0 {
             config.search.max_results = DEFAULT_SEARCH_RESULTS;
         }
-        config.workers.summarizer.model = config.workers.summarizer.model.trim().to_owned();
-        if config.workers.summarizer.max_output_tokens == 0 {
-            config.workers.summarizer.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
-        }
-        config.workers.distiller.model = config.workers.distiller.model.trim().to_owned();
-        if config.workers.distiller.max_output_tokens == 0 {
-            config.workers.distiller.max_output_tokens = DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
-        }
-        config.workers.reflector.model = config.workers.reflector.model.trim().to_owned();
-        if config.workers.reflector.max_output_tokens == 0 {
-            config.workers.reflector.max_output_tokens = DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS;
+        normalize_worker(
+            &mut config.workers.summarizer.model,
+            &mut config.workers.summarizer.max_output_tokens,
+            DEFAULT_WORKER_MAX_OUTPUT_TOKENS,
+        );
+        normalize_worker(
+            &mut config.workers.distiller.model,
+            &mut config.workers.distiller.max_output_tokens,
+            DEFAULT_WORKER_MAX_OUTPUT_TOKENS,
+        );
+        normalize_worker(
+            &mut config.workers.reflector.model,
+            &mut config.workers.reflector.max_output_tokens,
+            DEFAULT_REFLECTOR_MAX_OUTPUT_TOKENS,
+        );
+        if config.context.max_prompt_tokens == 0 {
+            config.context.max_prompt_tokens = DEFAULT_MAX_PROMPT_TOKENS;
         }
         config.reflect.time = config.reflect.time.trim().to_owned();
         if parse_hhmm(&config.reflect.time).is_none() {
@@ -331,6 +337,14 @@ impl Config {
             return Err(ApiError::config("[provider] model must not be empty"));
         }
         Ok(config)
+    }
+}
+
+/// Trim a worker's model and turn a 0 token cap into the given default.
+fn normalize_worker(model: &mut String, max_output_tokens: &mut u32, default_tokens: u32) {
+    *model = model.trim().to_owned();
+    if *max_output_tokens == 0 {
+        *max_output_tokens = default_tokens;
     }
 }
 

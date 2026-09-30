@@ -42,8 +42,10 @@ pub fn safe_file_name(name: &str) -> Result<String> {
 
 /// Resolve a workspace-relative path for serving (M5, ADR-017). Every
 /// component must be ordinary and the canonical result must stay inside the
-/// workspace, so neither `..` nor a symlink can escape. Errors: `Config` for
-/// malformed input, `Forbidden` for escapes, `NotFound` for missing files.
+/// workspace, so neither `..` nor a symlink can escape. Internal names
+/// ([`is_internal_name`]) are refused outright. Errors: `Config` for empty
+/// input, `Forbidden` for escapes and reserved names, `NotFound` for missing
+/// files.
 pub fn resolve_workspace_file(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
         return Err(ApiError::config("a file path is required"));
@@ -59,7 +61,15 @@ pub fn resolve_workspace_file(root: &Path, rel: &str) -> Result<PathBuf> {
     })?;
     let mut candidate = root.clone();
     for component in rel.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
+        // Internal names (hidden files, `__pycache__`, `*.pyc`) are reserved:
+        // the artifact scan skips them and uploads cannot create them, so the
+        // only dotted files in a workspace are transient upload tmp files —
+        // serving one would hand back a partial upload.
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || is_internal_name(component)
+        {
             return Err(ApiError::new(
                 ApiErrorKind::Forbidden,
                 format!("unsafe path component in {rel:?}"),
@@ -170,6 +180,16 @@ mod tests {
             assert!(
                 err.kind == ApiErrorKind::Forbidden || err.kind == ApiErrorKind::Config,
                 "{bad:?} must be refused, got {err:?}"
+            );
+        }
+        // Internal names (hidden files, bytecode caches) are never served:
+        // the artifact scan hides them and uploads cannot create them.
+        std::fs::write(root.join(".kaeru-upload-1-0.tmp"), b"partial").unwrap();
+        for bad in [".kaeru-upload-1-0.tmp", "sub/../.env", "__pycache__/m.pyc"] {
+            assert_eq!(
+                resolve_workspace_file(&root, bad).unwrap_err().kind,
+                ApiErrorKind::Forbidden,
+                "{bad:?} must be refused"
             );
         }
         assert_eq!(

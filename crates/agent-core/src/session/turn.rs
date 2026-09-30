@@ -80,7 +80,7 @@ pub(super) fn abort_turn(inner: &Arc<Mutex<SessionInner>>, only: Option<u64>) ->
         .expect("reasoning lock poisoned")
         .clone();
     if !partial.is_empty() {
-        let mut message = assistant_message(partial, reasoning);
+        let mut message = ChatMessage::assistant_with_reasoning(partial, reasoning);
         message.artifacts = active
             .artifacts
             .lock()
@@ -220,8 +220,6 @@ pub(super) async fn run_turn(task: TurnTask) {
     finalize_turn(&session, turn_id, &partial, &reasoning, &artifacts, result);
 }
 
-/// Build the assistant message for a finished turn, attaching the model's
-/// thinking (when any) so the UI can show it again after a reload.
 /// Attach a turn's artifacts (M5) to its final plain answer; intermediate
 /// assistant messages carry tool calls, never artifacts.
 fn attach_artifacts(messages: &mut [ChatMessage], artifacts: Vec<Artifact>) {
@@ -234,15 +232,6 @@ fn attach_artifacts(messages: &mut [ChatMessage], artifacts: Vec<Artifact>) {
         .find(|message| message.role == crate::llm::Role::Assistant && message.tool_calls.is_none())
     {
         message.artifacts = artifacts;
-    }
-}
-
-fn assistant_message(content: String, reasoning: String) -> ChatMessage {
-    let message = ChatMessage::assistant(content);
-    if reasoning.is_empty() {
-        message
-    } else {
-        message.with_reasoning(reasoning)
     }
 }
 
@@ -279,7 +268,7 @@ fn finalize_turn(
         if !partial.is_empty() {
             // Failed after streaming text (no final message): keep what showed.
             let reasoning = reasoning.lock().expect("reasoning lock poisoned").clone();
-            let mut message = assistant_message(partial, reasoning);
+            let mut message = ChatMessage::assistant_with_reasoning(partial, reasoning);
             message.artifacts = collected;
             inner.history.push(message);
         } else if result.outcome == crate::agent::TurnOutcome::Failed {

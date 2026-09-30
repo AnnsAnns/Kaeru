@@ -185,7 +185,10 @@ pub async fn run(input: TurnInput) -> LoopResult {
 
         // No tool calls: this step is the final answer.
         if step_calls.is_empty() {
-            new_messages.push(assistant_message(step_text, step_reasoning));
+            new_messages.push(ChatMessage::assistant_with_reasoning(
+                step_text,
+                step_reasoning,
+            ));
             emitter.emit(CoreEvent::TurnDone {
                 usage: usage_of(&total_usage, saw_usage),
             });
@@ -349,15 +352,6 @@ async fn run_tool(
             true,
             format!("error:{}", err.kind.as_str()),
         ),
-    }
-}
-
-fn assistant_message(content: String, reasoning: String) -> ChatMessage {
-    let message = ChatMessage::assistant(content);
-    if reasoning.is_empty() {
-        message
-    } else {
-        message.with_reasoning(reasoning)
     }
 }
 

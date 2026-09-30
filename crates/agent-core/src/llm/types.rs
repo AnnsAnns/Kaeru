@@ -93,6 +93,21 @@ impl ChatMessage {
         message
     }
 
+    /// An assistant message with its model thinking attached; empty thinking
+    /// stays off, so the field is never `Some("")`.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: impl Into<String>,
+    ) -> Self {
+        let reasoning = reasoning.into();
+        let message = Self::assistant(content);
+        if reasoning.is_empty() {
+            message
+        } else {
+            message.with_reasoning(reasoning)
+        }
+    }
+
     /// A `tool` result message answering `tool_call_id` (M3).
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         let mut message = Self::new(Role::Tool, content);

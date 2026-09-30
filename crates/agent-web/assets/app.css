@@ -1002,12 +1002,20 @@ body {
   .composer-box {
     min-height: 0;
   }
-  /* Slimmer composer buttons leave more room for the text on a small phone. */
+  /* The flattened boxes are only 3px apart, so give the message list a real
+     (but small) gap; the rings would otherwise touch. */
+  #messages {
+    gap: 8px;
+  }
+  /* Slimmer composer buttons leave more room for the text on a small phone.
+     `flex: 0 0 auto` keeps them at their content width so the label is never
+     squeezed/clipped when the textarea is tight. */
   .composer-row {
     gap: 6px;
   }
   .composer-row .action-btn {
-    min-width: 48px;
+    flex: 0 0 auto;
+    min-width: 44px;
     font-size: 14px;
   }
 }

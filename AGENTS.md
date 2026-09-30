@@ -118,7 +118,9 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   (`{"lastRun": <unix>}`) advances only on a fully successful reflection; the
   scheduler (`agent/reflect.rs`) compares local `(date, minutes)` tuples against
   the scheduled time, so it is testable with an injected clock and never hammers
-  a failure (one attempt per cycle, retried next day). Reflection writes under
+  a failure (one attempt per cycle, retried next day). Digests serialize on a
+  lock, so the scheduler and `POST /api/reflect` never overlap (a queued run
+  right after typically finds nothing left to digest). Reflection writes under
   standing consent (`[reflect] enabled`), tool-free (C16), notes tagged
   `reflect`. Every run also reflects on the agent's own persona: that thinking
   is always written as a `reflect, persona` memory note (why + how). When
@@ -163,8 +165,10 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
 - **M5 file flow:** `agent-web/src/files.rs` uploads the raw body to
   `?name=` (single component, no hidden names) and serves
   `GET /api/files/{*path}` through `agent_core::sandbox::workspace` — no
-  `.`/`..` components, canonical containment check → 403 on traversal or
-  symlink escape. Only raster images are `inline`; SVG/HTML download as
+  `.`/`..` components, no internal/hidden names (the only dotted files in a
+  workspace are transient upload tmp files), canonical containment check →
+  403 on traversal or symlink escape. Only raster images are `inline`;
+  SVG/HTML download as
   attachments with `nosniff`. The UI must fetch with `X-Auth-Token` and use
   blob URLs (an `<img>` tag cannot carry the header).
 - **M5 message files:** workspace files are persisted *on messages*

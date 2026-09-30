@@ -69,6 +69,28 @@ pub struct ReflectOutcome {
     pub persona_changed: bool,
 }
 
+impl ReflectOutcome {
+    /// A run that never started (disabled or not due).
+    fn skipped(status: ReflectStatus) -> Self {
+        Self {
+            status,
+            conversations: 0,
+            notes: 0,
+            persona_changed: false,
+        }
+    }
+
+    /// A completed run.
+    fn ran(conversations: usize, notes: usize, persona_changed: bool) -> Self {
+        Self {
+            status: ReflectStatus::Ran,
+            conversations,
+            notes,
+            persona_changed,
+        }
+    }
+}
+
 /// The reflection state file (`data/reflect-state.json`, ADR-028).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ReflectState {
@@ -87,6 +109,9 @@ pub struct Reflector {
     /// Whether the reflector may revise `data/persona.md` (M4.5).
     persona_edits: bool,
     tick: Duration,
+    /// Serializes digests: the scheduler and `POST /api/reflect` must never
+    /// run two at once (double worker spend, racing persona writes).
+    digest_lock: tokio::sync::Mutex<()>,
 }
 
 impl Reflector {
@@ -127,6 +152,7 @@ impl Reflector {
             scheduled_minutes,
             persona_edits,
             tick: REFLECT_TICK,
+            digest_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -190,20 +216,10 @@ impl Reflector {
     /// the scheduler both call this).
     pub async fn run_scheduled(&self, now: u64) -> Result<ReflectOutcome> {
         if !self.enabled {
-            return Ok(ReflectOutcome {
-                status: ReflectStatus::Disabled,
-                conversations: 0,
-                notes: 0,
-                persona_changed: false,
-            });
+            return Ok(ReflectOutcome::skipped(ReflectStatus::Disabled));
         }
         if self.due_cycle(now).is_none() {
-            return Ok(ReflectOutcome {
-                status: ReflectStatus::NotDue,
-                conversations: 0,
-                notes: 0,
-                persona_changed: false,
-            });
+            return Ok(ReflectOutcome::skipped(ReflectStatus::NotDue));
         }
         self.run_digest(now).await
     }
@@ -212,19 +228,17 @@ impl Reflector {
     /// but still honors the enabled flag.
     pub async fn run_now(&self, now: u64) -> Result<ReflectOutcome> {
         if !self.enabled {
-            return Ok(ReflectOutcome {
-                status: ReflectStatus::Disabled,
-                conversations: 0,
-                notes: 0,
-                persona_changed: false,
-            });
+            return Ok(ReflectOutcome::skipped(ReflectStatus::Disabled));
         }
         self.run_digest(now).await
     }
 
     /// Digest and write, auditing the attempt either way. The state file
-    /// advances only when the whole run succeeds.
+    /// advances only when the whole run succeeds. Digests serialize on the
+    /// lock; a concurrent caller runs right after and typically finds nothing
+    /// left to digest (the state advanced).
     async fn run_digest(&self, now: u64) -> Result<ReflectOutcome> {
+        let _guard = self.digest_lock.lock().await;
         let started = Instant::now();
         let result = self.digest(now).await;
         let (status, input) = match &result {
@@ -236,7 +250,7 @@ impl Reflector {
                     "persona_changed": outcome.persona_changed,
                 }),
             ),
-            Err(err) => (format!("error: {}", err.kind.as_str()), json!({})),
+            Err(err) => (format!("error:{}", err.kind.as_str()), json!({})),
         };
         self.core.audit().append(&AuditEntry {
             turn_id: None,
@@ -266,12 +280,7 @@ impl Reflector {
 
         if remaining.is_empty() {
             self.write_state(now)?;
-            return Ok(ReflectOutcome {
-                status: ReflectStatus::Ran,
-                conversations: 0,
-                notes: 0,
-                persona_changed: false,
-            });
+            return Ok(ReflectOutcome::ran(0, 0, false));
         }
 
         let persona = self.core.persona();
@@ -330,12 +339,7 @@ impl Reflector {
             None => false,
         };
         self.write_state(now)?;
-        Ok(ReflectOutcome {
-            status: ReflectStatus::Ran,
-            conversations: digested,
-            notes: written,
-            persona_changed,
-        })
+        Ok(ReflectOutcome::ran(digested, written, persona_changed))
     }
 
     /// Handle the reflector's persona reflection: record what it noticed and
@@ -468,7 +472,9 @@ fn transcript(conversation: &Conversation) -> String {
     let mut text = String::new();
     for message in &conversation.messages {
         text.push_str(&format!("[{}] {}\n", message.role, message.content));
-        if text.chars().count() >= REFLECT_TRANSCRIPT_MAX_CHARS {
+        // Bytes >= chars, so this is a safe early exit; the exact character
+        // cap is applied once by the truncate below.
+        if text.len() >= REFLECT_TRANSCRIPT_MAX_CHARS {
             break;
         }
     }

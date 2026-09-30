@@ -27,6 +27,14 @@
   const memoryQueryEl = $("memory-query");
   const memoryListEl = $("memory-list");
   const memoryEmptyEl = $("memory-empty");
+  const todoBtn = $("todo-btn");
+  const todoListSelect = $("todo-list-select");
+  const todoNewListForm = $("todo-new-list");
+  const todoNewListInput = $("todo-new-list-input");
+  const todoNewItemForm = $("todo-new-item");
+  const todoNewItemInput = $("todo-new-item-input");
+  const todoItemsEl = $("todo-items");
+  const todoEmptyEl = $("todo-empty");
   const reflectBtn = $("reflect-btn");
   const reflectStatusEl = $("reflect-status");
   const attachBtn = $("attach-btn");
@@ -59,6 +67,8 @@
     usage: { in: 0, out: 0 },
     threadId: null,
     threads: [],
+    // The TODO list currently shown in the panel (M7).
+    todoSlug: null,
     // Workspace files uploaded for the next message (M5).
     attachments: [],
     // True briefly while the user toggles a card: growth from that action
@@ -1053,6 +1063,8 @@
         }
         // A memory_write may just have landed; keep an open browser fresh.
         refreshMemoryIfOpen();
+        // A `todo` tool call may just have edited the lists (M7).
+        refreshTodoIfOpen();
         break;
       case "error":
         turn.terminal = true;
@@ -1201,6 +1213,181 @@
     } finally {
       reflectBtn.disabled = false;
     }
+  });
+
+  /* ---------- TODO lists (M7, ADR-029) ---------- */
+
+  function renderTodoItems(list) {
+    todoItemsEl.replaceChildren();
+    todoNewItemForm.hidden = !list;
+    if (!list) return;
+    if (!list.items.length) {
+      const hint = document.createElement("li");
+      hint.className = "todo-empty-row";
+      hint.textContent = "no items yet";
+      todoItemsEl.append(hint);
+      return;
+    }
+    for (const item of list.items) {
+      const row = document.createElement("li");
+      row.className = "todo-item" + (item.done ? " done" : "");
+
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = item.done;
+      check.title = item.done ? "mark not done" : "mark done";
+      check.addEventListener("change", () => {
+        patchTodoItem(item.id, { done: check.checked }).catch(reportError);
+      });
+
+      const text = document.createElement("span");
+      text.className = "todo-item-text";
+      text.textContent = item.text;
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "todo-item-del";
+      del.textContent = "✕";
+      del.title = "remove item";
+      del.addEventListener("click", () => {
+        deleteTodoItem(item.id).catch(reportError);
+      });
+
+      row.append(check, text, del);
+      todoItemsEl.append(row);
+    }
+  }
+
+  async function loadTodoItems(slug) {
+    if (!slug) {
+      renderTodoItems(null);
+      return;
+    }
+    const response = await apiFetch(
+      `/api/todos/${encodeURIComponent(slug)}`,
+      {},
+      () => loadTodoItems(slug),
+    );
+    if (!response.ok) throw await readApiError(response);
+    renderTodoItems(await response.json());
+  }
+
+  // Lists (and, for the selected one, its items) are reloaded together so the
+  // counts in the picker stay in step after any mutation.
+  async function loadTodoLists() {
+    const response = await apiFetch("/api/todos", {}, () => loadTodoLists());
+    if (!response.ok) throw await readApiError(response);
+    const body = await response.json();
+    const lists = body.lists || [];
+    todoEmptyEl.hidden = lists.length > 0;
+    todoListSelect.replaceChildren();
+    for (const list of lists) {
+      const option = document.createElement("option");
+      option.value = list.slug;
+      option.textContent = `${list.title} (${list.open})`;
+      todoListSelect.append(option);
+    }
+    if (!lists.length) {
+      state.todoSlug = null;
+      todoListSelect.hidden = true;
+      renderTodoItems(null);
+      return;
+    }
+    todoListSelect.hidden = false;
+    const keep = lists.some((list) => list.slug === state.todoSlug);
+    state.todoSlug = keep ? state.todoSlug : lists[0].slug;
+    todoListSelect.value = state.todoSlug;
+    await loadTodoItems(state.todoSlug);
+  }
+
+  async function createTodoList(title) {
+    const response = await apiFetch(
+      "/api/todos",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title }),
+      },
+      () => createTodoList(title),
+    );
+    if (!response.ok) throw await readApiError(response);
+    const list = await response.json();
+    state.todoSlug = list.slug;
+    await loadTodoLists();
+  }
+
+  async function addTodoItem(text) {
+    const response = await apiFetch(
+      `/api/todos/${encodeURIComponent(state.todoSlug)}/items`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      },
+      () => addTodoItem(text),
+    );
+    if (!response.ok) throw await readApiError(response);
+    await loadTodoLists();
+  }
+
+  async function patchTodoItem(id, patch) {
+    const response = await apiFetch(
+      `/api/todos/${encodeURIComponent(state.todoSlug)}/items/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      },
+      () => patchTodoItem(id, patch),
+    );
+    if (!response.ok) throw await readApiError(response);
+    await loadTodoLists();
+  }
+
+  async function deleteTodoItem(id) {
+    const response = await apiFetch(
+      `/api/todos/${encodeURIComponent(state.todoSlug)}/items/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+      () => deleteTodoItem(id),
+    );
+    if (!response.ok) throw await readApiError(response);
+    await loadTodoLists();
+  }
+
+  function refreshTodoIfOpen() {
+    if (workspaceEl.classList.contains("todo-open")) {
+      loadTodoLists().catch(() => {});
+    }
+  }
+
+  todoBtn.addEventListener("click", () => {
+    const open = workspaceEl.classList.toggle("todo-open");
+    todoBtn.setAttribute("aria-expanded", String(open));
+    if (open) loadTodoLists().catch(reportError);
+  });
+  todoListSelect.addEventListener("change", () => {
+    state.todoSlug = todoListSelect.value;
+    loadTodoItems(state.todoSlug).catch(reportError);
+  });
+  todoNewListForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const title = todoNewListInput.value.trim();
+    if (!title) return;
+    createTodoList(title)
+      .then(() => {
+        todoNewListInput.value = "";
+      })
+      .catch(reportError);
+  });
+  todoNewItemForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = todoNewItemInput.value.trim();
+    if (!text || !state.todoSlug) return;
+    addTodoItem(text)
+      .then(() => {
+        todoNewItemInput.value = "";
+      })
+      .catch(reportError);
   });
 
   /* ---------- models ---------- */

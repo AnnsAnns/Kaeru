@@ -10,8 +10,8 @@ use serde_json::json;
 use crate::{bridge, error};
 
 use super::{
-    AppState, ApprovalBody, ChatBody, MemoryQuery, ThreadQuery, resolve_existing, resolve_thread,
-    thread_error,
+    AppState, ApprovalBody, ChatBody, MemoryQuery, ThreadQuery, TodoCreateBody, TodoItemCreateBody,
+    TodoItemPatchBody, TodoRenameBody, resolve_existing, resolve_thread, thread_error, todo_error,
 };
 
 fn thread_payload(state: &AppState, session: &ChatSession) -> serde_json::Value {
@@ -308,4 +308,127 @@ fn reflect_status_name(status: agent_core::ReflectStatus) -> &'static str {
         agent_core::ReflectStatus::NotDue => "not_due",
         agent_core::ReflectStatus::Ran => "ran",
     }
+}
+
+/* ---------- TODO lists (M7, ADR-029) ---------- */
+
+/// The named lists, newest first. `configured: false` when no store is wired,
+/// mirroring `/api/memory`.
+pub(super) async fn list_todos(State(state): State<AppState>) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return Json(json!({ "configured": false, "count": 0, "lists": [] })).into_response();
+    };
+    match store.list() {
+        Ok(lists) => Json(json!({ "configured": true, "count": lists.len(), "lists": lists }))
+            .into_response(),
+        Err(err) => error::api_error(&err),
+    }
+}
+
+pub(super) async fn create_todo(
+    State(state): State<AppState>,
+    Json(body): Json<TodoCreateBody>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    match store.create(&body.title) {
+        Ok(list) => (StatusCode::CREATED, Json(list)).into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+pub(super) async fn get_todo(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
+    todo_list_response(&state, |store| store.get(&slug))
+}
+
+pub(super) async fn rename_todo(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Json(body): Json<TodoRenameBody>,
+) -> Response {
+    todo_list_response(&state, |store| store.rename(&slug, &body.title))
+}
+
+pub(super) async fn delete_todo(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    match store.delete(&slug) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+pub(super) async fn add_todo_item(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Json(body): Json<TodoItemCreateBody>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    match store.add_item(&slug, &body.text) {
+        Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+pub(super) async fn patch_todo_item(
+    State(state): State<AppState>,
+    Path((slug, id)): Path<(String, String)>,
+    Json(body): Json<TodoItemPatchBody>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    if body.text.is_none() && body.done.is_none() {
+        return error::json_error(
+            StatusCode::BAD_REQUEST,
+            "config",
+            "provide \"text\" and/or \"done\"",
+        );
+    }
+    match store.update_item(&slug, &id, body.text.as_deref(), body.done) {
+        Ok(item) => Json(item).into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+pub(super) async fn delete_todo_item(
+    State(state): State<AppState>,
+    Path((slug, id)): Path<(String, String)>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    match store.remove_item(&slug, &id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+/// Run a list-returning store call, mapping the absent store and errors.
+fn todo_list_response(
+    state: &AppState,
+    call: impl FnOnce(&agent_core::TodoStore) -> agent_core::Result<agent_core::TodoList>,
+) -> Response {
+    let Some(store) = state.todos.as_ref() else {
+        return todo_unconfigured();
+    };
+    match call(store) {
+        Ok(list) => Json(list).into_response(),
+        Err(err) => todo_error(&err),
+    }
+}
+
+fn todo_unconfigured() -> Response {
+    error::json_error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "TODO lists are not configured",
+    )
 }

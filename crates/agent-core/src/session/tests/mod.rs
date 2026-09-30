@@ -10,8 +10,9 @@ use crate::llm::{
 };
 use crate::sandbox::Sandbox;
 use crate::search::{FakeSearch, SearchResult};
+use crate::todos::TodoStore;
 use crate::tools::{
-    MemoryStore, MemoryWriteTool, PythonTool, Tool, ToolContext, ToolFuture, ToolRegistry,
+    MemoryStore, MemoryWriteTool, PythonTool, TodoTool, Tool, ToolContext, ToolFuture, ToolRegistry,
 };
 use crate::util::temp_dir;
 use serde_json::{Value, json};

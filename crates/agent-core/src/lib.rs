@@ -15,6 +15,7 @@ pub mod memory;
 pub mod sandbox;
 pub mod search;
 pub mod session;
+pub mod todos;
 pub mod tools;
 mod util;
 
@@ -50,6 +51,7 @@ pub use sandbox::{
 };
 pub use search::{DisabledSearch, FakeSearch, SearchProvider, SearchResult};
 pub use session::{ChatSession, ConversationRegistry, ThreadSummary, TurnHandle};
+pub use todos::{TODO_SCHEMA_VERSION, TodoItem, TodoList, TodoListSummary, TodoStore};
 pub use tools::{ArtifactSink, Tool, ToolContext, ToolRegistry};
 
 /// Shared core: configuration, the provider client, the tool registry, the

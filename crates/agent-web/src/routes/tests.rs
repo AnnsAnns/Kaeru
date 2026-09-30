@@ -208,7 +208,7 @@ async fn reflect_endpoint_runs_the_digest_on_demand() {
     let reflector = Arc::new(
         Reflector::from_core(Arc::clone(&core), store, dir.join("reflect-state.json")).unwrap(),
     );
-    let state = AppState::new(core, registry, Some(reflector), None);
+    let state = AppState::new(core, registry, Some(reflector), None, None);
 
     let response = request(
         &state,
@@ -839,4 +839,216 @@ async fn file_routes_require_auth_when_a_token_is_configured() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+/* ---------- M7 TODO lists ---------- */
+
+/// Read a JSON body out of a response (the small helper the file tests lack).
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let (_, body) = response.into_parts();
+    serde_json::from_slice(&body.collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn todo_lists_can_be_created_listed_edited_and_deleted() {
+    let state = AppState::fake();
+
+    let created = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos",
+        Some(&json!({ "title": "Shopping list" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let list = response_json(created).await;
+    assert_eq!(list["slug"], "shopping-list");
+    assert_eq!(list["title"], "Shopping list");
+
+    let added = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos/shopping-list/items",
+        Some(&json!({ "text": "oat milk" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(added.status(), StatusCode::CREATED);
+    let item = response_json(added).await;
+    let id = item["id"].as_str().unwrap().to_owned();
+    assert_eq!(item["done"], false);
+
+    let checked = request(
+        &state,
+        axum::http::Method::PATCH,
+        &format!("/api/todos/shopping-list/items/{id}"),
+        Some(&json!({ "done": true })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(checked.status(), StatusCode::OK);
+
+    let (status, json, _) = get_json(&state, "/api/todos", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["configured"], true);
+    let lists = json["lists"].as_array().unwrap();
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0]["slug"], "shopping-list");
+    assert_eq!(lists[0]["open"], 0);
+    assert_eq!(lists[0]["done"], 1);
+
+    let (status, json, _) = get_json(&state, "/api/todos/shopping-list", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["items"][0]["text"], "oat milk");
+    assert_eq!(json["items"][0]["done"], true);
+
+    let removed = request(
+        &state,
+        axum::http::Method::DELETE,
+        &format!("/api/todos/shopping-list/items/{id}"),
+        None,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+    let deleted = request(
+        &state,
+        axum::http::Method::DELETE,
+        "/api/todos/shopping-list",
+        None,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let (status, _, _) = get_json(&state, "/api/todos/shopping-list", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn todo_rename_keeps_the_slug_and_unknown_lists_are_404() {
+    let state = AppState::fake();
+    let created = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos",
+        Some(&json!({ "title": "Projects" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let renamed = request(
+        &state,
+        axum::http::Method::PATCH,
+        "/api/todos/projects",
+        Some(&json!({ "title": "Work" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let list = response_json(renamed).await;
+    assert_eq!(list["title"], "Work");
+    assert_eq!(list["slug"], "projects");
+
+    // A missing list (or item) is a plain 404, not a gateway error.
+    let (status, _, _) = get_json(&state, "/api/todos/ghost", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let response = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos/ghost/items",
+        Some(&json!({ "text": "x" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn todo_bad_requests_are_400() {
+    let state = AppState::fake();
+    let response = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos",
+        Some(&json!({ "title": "   " })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let created = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos",
+        Some(&json!({ "title": "Work" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let added = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos/work/items",
+        Some(&json!({ "text": "task" })),
+        HeaderMap::new(),
+    )
+    .await;
+    let id = response_json(added).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A patch with nothing to change is rejected.
+    let response = request(
+        &state,
+        axum::http::Method::PATCH,
+        &format!("/api/todos/work/items/{id}"),
+        Some(&json!({})),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // An empty item text is rejected.
+    let response = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos/work/items",
+        Some(&json!({ "text": "  " })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn todo_endpoint_reports_unconfigured_without_a_store() {
+    let mut state = AppState::fake();
+    state.todos = None;
+    let (status, json, _) = get_json(&state, "/api/todos", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["configured"], false);
+
+    let response = request(
+        &state,
+        axum::http::Method::POST,
+        "/api/todos",
+        Some(&json!({ "title": "x" })),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn todo_routes_require_auth_when_a_token_is_configured() {
+    let state = state_with_token(Some("s3cret"));
+    let (status, _, _) = get_json(&state, "/api/todos", HeaderMap::new()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        get_json(&state, "/api/todos", headers(&[("x-auth-token", "s3cret")])).await;
+    assert_eq!(status, StatusCode::OK);
 }

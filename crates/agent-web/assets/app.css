@@ -770,3 +770,83 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ---- TODO lists (M7) ---- */
+.todo-panel {
+  display: none;
+  flex-direction: column;
+  width: 300px;
+  flex: 0 0 300px;
+  align-self: flex-start;
+  max-height: 100%;
+  overflow-y: auto;
+}
+.workspace.todo-open .todo-panel {
+  display: flex;
+}
+.todo-new-list,
+.todo-new-item {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+.todo-new-list input,
+.todo-new-item input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: var(--base-background-color);
+  border: 1px solid color-mix(in srgb, var(--box-color-standard) 60%, transparent);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.todo-list-wrap {
+  display: block;
+  margin: 4px 0;
+}
+.todo-list-select {
+  width: 100%;
+}
+.todo-items {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--base-background-color);
+  border-radius: 4px;
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 55%, transparent);
+  padding: 6px 8px;
+}
+.todo-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.todo-item.done .todo-item-text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.todo-item-del {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 0 2px;
+}
+.todo-item-del:hover {
+  opacity: 1;
+}
+.todo-empty-row {
+  font-size: 12px;
+  opacity: 0.7;
+}

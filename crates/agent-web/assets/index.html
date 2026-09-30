@@ -18,6 +18,7 @@
       <div class="header-controls">
         <button id="threads-btn" class="chip" type="button" title="Toggle threads" aria-expanded="false">🧵 Threads</button>
         <button id="memory-btn" class="chip" type="button" title="Toggle memory" aria-expanded="false">🗒️ Memory</button>
+        <button id="todo-btn" class="chip" type="button" title="Toggle TODO lists" aria-expanded="false">✅ TODO</button>
         <button id="theme-btn" class="chip" type="button" title="Cycle theme">
           <span aria-hidden="true">🎨 Theme:</span> <br /> <span id="theme-name">latenightbath</span>
         </button>
@@ -61,6 +62,29 @@
         <p id="reflect-status" class="memory-empty" hidden></p>
         <p id="memory-empty" class="memory-empty" hidden>no notes yet — ask kaeru to remember something</p>
         <ul id="memory-list" class="memory-list"></ul>
+      </aside>
+
+      <aside id="todo-panel" class="box todo-panel" aria-label="TODO lists">
+        <div class="box-title">
+          <span class="title-label">TODO</span>
+          <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
+        </div>
+        <form id="todo-new-list" class="todo-new-list">
+          <input id="todo-new-list-input" type="text" placeholder="new list…"
+            autocomplete="off" spellcheck="false" aria-label="New list title">
+          <button type="submit" class="action-btn">add list</button>
+        </form>
+        <p id="todo-empty" class="memory-empty" hidden>no lists yet — add one above</p>
+        <label class="todo-list-wrap">
+          <span class="visually-hidden">List</span>
+          <select id="todo-list-select" class="chip todo-list-select" hidden></select>
+        </label>
+        <form id="todo-new-item" class="todo-new-item" hidden>
+          <input id="todo-new-item-input" type="text" placeholder="new item…"
+            autocomplete="off" spellcheck="true" aria-label="New item">
+          <button type="submit" class="action-btn">add</button>
+        </form>
+        <ul id="todo-items" class="todo-items"></ul>
       </aside>
     </div>
 

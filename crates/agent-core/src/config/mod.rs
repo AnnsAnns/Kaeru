@@ -345,6 +345,8 @@ pub struct Paths {
     pub audit: PathBuf,
     /// Markdown memory store (M3 write side; M4 enriches).
     pub memory: PathBuf,
+    /// Named TODO lists (M7, ADR-029).
+    pub todos: PathBuf,
     /// Owner-written persona/character file (M4.5, ADR-027).
     pub persona: PathBuf,
     /// Last successful evening-reflection run (M4.5, ADR-028).
@@ -361,6 +363,7 @@ impl Default for Paths {
             conversations: PathBuf::from("data/conversations"),
             audit: PathBuf::from("data/audit.jsonl"),
             memory: PathBuf::from("data/memory"),
+            todos: PathBuf::from("data/todos"),
             persona: PathBuf::from("data/persona.md"),
             reflect_state: PathBuf::from("data/reflect-state.json"),
             sandbox_envs: PathBuf::from("data/sandbox/envs"),

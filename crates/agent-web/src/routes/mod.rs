@@ -9,8 +9,10 @@ mod handlers;
 mod tests;
 
 use handlers::{
-    create_thread, delete_thread, get_models, get_session, get_stream, get_thread, list_memory,
-    list_threads, post_abort, post_approval, post_chat, post_reflect, post_regenerate,
+    add_todo_item, create_thread, create_todo, delete_thread, delete_todo, delete_todo_item,
+    get_models, get_session, get_stream, get_thread, get_todo, list_memory, list_threads,
+    list_todos, patch_todo_item, post_abort, post_approval, post_chat, post_reflect,
+    post_regenerate, rename_todo,
 };
 
 use std::sync::Arc;
@@ -21,7 +23,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde::Deserialize;
 
 use crate::{assets, error, files};
@@ -34,6 +36,8 @@ pub struct AppState {
     pub reflector: Option<Arc<Reflector>>,
     /// Workspace file flow (M5); `None` when the frontend did not wire one.
     pub files: Option<files::Files>,
+    /// Named TODO lists (M7); `None` when the frontend did not wire one.
+    pub todos: Option<agent_core::TodoStore>,
 }
 
 impl AppState {
@@ -42,12 +46,14 @@ impl AppState {
         registry: Arc<ConversationRegistry>,
         reflector: Option<Arc<Reflector>>,
         files: Option<files::Files>,
+        todos: Option<agent_core::TodoStore>,
     ) -> Self {
         Self {
             core,
             registry,
             reflector,
             files,
+            todos,
         }
     }
 
@@ -88,6 +94,7 @@ impl AppState {
                 workspace,
                 max_upload_bytes: 1024 * 1024,
             }),
+            todos: Some(agent_core::TodoStore::new(dir.join("todos"))),
         }
     }
 }
@@ -112,6 +119,16 @@ pub fn router(state: AppState) -> Router {
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route("/memory", get(list_memory))
         .route("/reflect", post(post_reflect))
+        .route("/todos", get(list_todos).post(create_todo))
+        .route(
+            "/todos/{slug}",
+            get(get_todo).patch(rename_todo).delete(delete_todo),
+        )
+        .route("/todos/{slug}/items", post(add_todo_item))
+        .route(
+            "/todos/{slug}/items/{id}",
+            patch(patch_todo_item).delete(delete_todo_item),
+        )
         .route(
             "/files",
             post(files::upload).layer(DefaultBodyLimit::max(upload_limit.max(1))),
@@ -207,10 +224,46 @@ struct ApprovalBody {
     #[serde(default)]
     thread: Option<String>,
 }
+
+/// Create a named TODO list (M7).
+#[derive(Debug, Deserialize)]
+struct TodoCreateBody {
+    title: String,
+}
+
+/// Rename a named TODO list (M7): title only, the slug/file stays.
+#[derive(Debug, Deserialize)]
+struct TodoRenameBody {
+    title: String,
+}
+
+/// Add an item to a named TODO list (M7).
+#[derive(Debug, Deserialize)]
+struct TodoItemCreateBody {
+    text: String,
+}
+
+/// Patch one item (M7): a new `text` and/or a new `done` state.
+#[derive(Debug, Default, Deserialize)]
+struct TodoItemPatchBody {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    done: Option<bool>,
+}
 /// Map a core error to HTTP, honoring an explicit thread lookup: a missing
 /// thread is a plain 404 (a client mistake), unlike the provider-flavored
 /// `NotFound` that becomes a gateway error.
 fn thread_error(err: &agent_core::ApiError) -> Response {
+    if err.kind == agent_core::ApiErrorKind::NotFound {
+        error::json_error(StatusCode::NOT_FOUND, "not_found", err.message.clone())
+    } else {
+        error::api_error(err)
+    }
+}
+
+/// Same idea for TODO lookups (M7): a missing list or item is a plain 404.
+fn todo_error(err: &agent_core::ApiError) -> Response {
     if err.kind == agent_core::ApiErrorKind::NotFound {
         error::json_error(StatusCode::NOT_FOUND, "not_found", err.message.clone())
     } else {

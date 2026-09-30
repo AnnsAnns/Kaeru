@@ -232,6 +232,9 @@ pub enum ApprovalKind {
     PackageInstall { packages: Vec<String> },
     /// Grant network access inside the sandbox \[M5].
     NetworkAccess { reason: String },
+    /// Mutate a named TODO list (M7, ADR-029). Lists persist across sessions,
+    /// so a silent write is a prompt-injection vector like `memory_write`.
+    TodoWrite { list: String },
 }
 
 /// A user decision on an `ApprovalRequest`. Deny (or timeout) fails closed.
@@ -365,6 +368,20 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({"kind": "memory_write", "path": "data/memory/2026-09-11"})
+        );
+        let back: ApprovalKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn todo_write_approval_kind_round_trips() {
+        let kind = ApprovalKind::TodoWrite {
+            list: "shopping".into(),
+        };
+        let json = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "todo_write", "list": "shopping"})
         );
         let back: ApprovalKind = serde_json::from_value(json).unwrap();
         assert_eq!(back, kind);

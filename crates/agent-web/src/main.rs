@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentCore, AuditLog, ClientMode, Config, ConversationRegistry, ConversationStore, MemoryStore,
-    Paths, Reflector, Sandbox, ToolRegistry,
+    Paths, Reflector, Sandbox, TodoStore, ToolRegistry,
 };
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
@@ -132,12 +132,15 @@ fn main() {
     }
 
     let memory = MemoryStore::new(cli.paths.memory.clone());
+    // M7: named TODO lists, shared by the `todo` tool and the web TODO tab.
+    let todos = TodoStore::new(cli.paths.todos.clone());
     let core = match AgentCore::connect(config.clone(), mode) {
         Ok(core) => Arc::new(
             core.with_tools(ToolRegistry::with_defaults(
                 config.search.max_results,
                 Some(memory.clone()),
                 Some(Arc::clone(&sandbox)),
+                Some(todos.clone()),
             ))
             .with_memory(memory)
             .with_persona(cli.paths.persona.clone())
@@ -171,6 +174,7 @@ fn main() {
             )
             .unwrap_or(usize::MAX),
         }),
+        Some(todos),
     );
 
     banner(&cli, &config, &state);
@@ -253,6 +257,11 @@ fn banner(cli: &Cli, config: &Config, state: &AppState) {
         config.sandbox.workspace.display()
     );
     println!("  tools      : {}", state.core.tools().len());
+    println!(
+        "  todos      : {} ({})",
+        if state.todos.is_some() { "on" } else { "off" },
+        cli.paths.todos.display()
+    );
     println!(
         "  audit      : {}",
         state

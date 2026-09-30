@@ -5,6 +5,7 @@
 
 pub mod memory;
 pub mod python;
+pub mod todo;
 pub mod web_search;
 
 use std::future::Future;
@@ -20,11 +21,13 @@ use crate::events::Risk;
 use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::search::SearchProvider;
+use crate::todos::TodoStore;
 use crate::util::truncate_chars;
 
 pub use crate::memory::MemoryStore;
 pub use memory::{MemorySearchTool, MemoryWriteTool};
 pub use python::PythonTool;
+pub use todo::TodoTool;
 pub use web_search::WebSearchTool;
 
 /// A tool execution future.
@@ -124,12 +127,13 @@ impl ToolRegistry {
     }
 
     /// The default set: `web_search` (always), `memory_write` +
-    /// `memory_search` (only with a memory store), and `python` (only with a
-    /// configured sandbox).
+    /// `memory_search` (only with a memory store), `python` (only with a
+    /// configured sandbox), and `todo` (only with a todo store).
     pub fn with_defaults(
         max_search_results: usize,
         memory: Option<MemoryStore>,
         sandbox: Option<Arc<Sandbox>>,
+        todos: Option<TodoStore>,
     ) -> Self {
         let mut registry = Self::new();
         registry.register(WebSearchTool::new(max_search_results));
@@ -139,6 +143,9 @@ impl ToolRegistry {
         }
         if let Some(sandbox) = sandbox {
             registry.register(PythonTool::new(sandbox));
+        }
+        if let Some(store) = todos {
+            registry.register(TodoTool::new(store));
         }
         registry
     }

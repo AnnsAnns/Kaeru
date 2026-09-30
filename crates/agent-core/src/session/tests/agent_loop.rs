@@ -194,6 +194,112 @@ async fn denied_consent_writes_nothing_and_is_audited() {
 }
 
 #[tokio::test]
+async fn todo_mutation_waits_for_consent_and_persists_when_allowed() {
+    let dir = temp_dir("m7", "todo-consent");
+    let audit_path = dir.join("audit.jsonl");
+    let store = TodoStore::new(dir.join("todos"));
+    store.create("Shopping").unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(TodoTool::new(store.clone()));
+    let client = ScriptedClient::new(vec![
+        vec![
+            CoreEvent::ToolCall {
+                id: "c1".into(),
+                name: "todo".into(),
+                input: json!({"action": "add", "list": "shopping", "text": "oat milk"}),
+            },
+            CoreEvent::TurnDone { usage: None },
+        ],
+        vec![
+            CoreEvent::Delta {
+                text: "added".into(),
+            },
+            CoreEvent::TurnDone { usage: None },
+        ],
+    ]);
+    let core = core_scripted(client, registry, AuditLog::new(&audit_path));
+    let session = Arc::new(ChatSession::new(core, "test"));
+
+    let handle = session.send("add oat milk to my shopping list").unwrap();
+    let mut tap = handle.events();
+    let approver = Arc::clone(&session);
+    let watcher = tokio::spawn(async move {
+        while let Ok(event) = tap.recv().await {
+            match event {
+                CoreEvent::ApprovalRequest { id, kind, .. } => {
+                    assert!(matches!(kind, ApprovalKind::TodoWrite { .. }));
+                    approver.approve(&id, Decision::Allow).unwrap();
+                    break;
+                }
+                CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
+                _ => {}
+            }
+        }
+    });
+    let events = drain(handle.into_events()).await;
+    watcher.await.unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::ApprovalRequest { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::ToolResult { is_error, .. } if !is_error))
+    );
+    assert_eq!(store.get("shopping").unwrap().items.len(), 1);
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(audit.contains("\"decision\":\"allow\""));
+    assert!(audit.contains("todo"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn denied_todo_mutation_writes_nothing() {
+    let dir = temp_dir("m7", "todo-deny");
+    let store = TodoStore::new(dir.join("todos"));
+    store.create("Shopping").unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(TodoTool::new(store.clone()));
+    let client = ScriptedClient::new(vec![vec![
+        CoreEvent::ToolCall {
+            id: "c1".into(),
+            name: "todo".into(),
+            input: json!({"action": "add", "list": "shopping", "text": "poison"}),
+        },
+        CoreEvent::TurnDone { usage: None },
+    ]]);
+    let core = core_scripted(client, registry, AuditLog::disabled());
+    let session = Arc::new(ChatSession::new(core, "test"));
+
+    let handle = session.send("add something").unwrap();
+    let mut tap = handle.events();
+    let approver = Arc::clone(&session);
+    let watcher = tokio::spawn(async move {
+        while let Ok(event) = tap.recv().await {
+            match event {
+                CoreEvent::ApprovalRequest { id, .. } => {
+                    approver.approve(&id, Decision::Deny).unwrap();
+                    break;
+                }
+                CoreEvent::TurnDone { .. } | CoreEvent::Error { .. } => break,
+                _ => {}
+            }
+        }
+    });
+    let events = drain(handle.into_events()).await;
+    watcher.await.unwrap();
+
+    assert!(events.iter().any(
+        |e| matches!(e, CoreEvent::ToolResult { output, is_error, .. } if *is_error && output.contains("denied"))
+    ));
+    assert!(store.get("shopping").unwrap().items.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn denied_python_install_is_a_structured_error_and_prepares_nothing() {
     let dir = temp_dir("m3", "python-deny");
     let sandbox = Arc::new(
@@ -289,7 +395,7 @@ async fn raw_fetched_pages_never_reach_the_main_model() {
             client.clone(),
             ClientMode::Live,
         )
-        .with_tools(ToolRegistry::with_defaults(5, None, None))
+        .with_tools(ToolRegistry::with_defaults(5, None, None, None))
         .with_search(search),
     );
     let session = ChatSession::new(core, "test");

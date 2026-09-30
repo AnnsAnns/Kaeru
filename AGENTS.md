@@ -6,7 +6,7 @@ far is `agent-web`, an axum server that embeds a hand-written chat UI (no build
 step) and streams from any OpenAI-compatible provider.
 
 `docs/arc42-architecture.md` is the **authoritative spec** (constraints C1–C18,
-ADRs, milestone roadmap M0–M6, acceptance checks). Read it before large
+ADRs, milestone roadmap M0–M7, acceptance checks). Read it before large
 changes; per-milestone implementation notes live in `docs/milestones/`.
 
 ## Commands
@@ -37,9 +37,9 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 ## Layout
 
 ```
-crates/agent-core/     library: config, events, llm (client/sse/fake/types/wire), session/{mod,turn,approvals,registry} (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python), sandbox (envprep/exec/limits/workspace), search, audit, memory
+crates/agent-core/     library: config, events, llm (client/sse/fake/types/wire), session/{mod,turn,approvals,registry} (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python/todo), sandbox (envprep/exec/limits/workspace), search, audit, memory, todos
 crates/agent-web/      axum binary: main.rs (CLI), routes/{mod,handlers}, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
-data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + sandbox/{workspace,envs}
+data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + todos/{slug}.json + sandbox/{workspace,envs}
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
 ```
@@ -87,8 +87,10 @@ stubs. Examples:
   `reflect`-tagged memory via the tool-free reflector worker. **M5** added the
   two-phase Python sandbox (`uv` env-prep + `bubblewrap` execution), the
   consent-gated `python` tool with artifact events, and the authenticated
-  workspace file flow. **M6** (Discord frontend / daemon split) is next — do
-  not build it early.
+  workspace file flow. **M7** added named TODO lists: a plain-file core
+  `TodoStore`, the consent-gated `todo` tool (`ApprovalKind::TodoWrite`), the
+  authenticated `/api/todos*` API and a web TODO tab. **M6** (Discord frontend
+  / daemon split) remains optional — do not build it early.
 - **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
 When you complete milestone work, update the matching `docs/milestones/Mx.md`
@@ -177,6 +179,14 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   called by `main.rs` before anything binds; missing tools exit 1 with
   instructions. Tests that need bwrap call `check_host` and skip with a note
   when the host cannot sandbox (CI without bwrap stays green).
+- **M7 TODO lists:** `agent-core/src/todos.rs` is a plain-file store (one
+  `data/todos/{slug}.json` per list, schema v1, atomic writes, quarantine on a
+  broken file) whose write mutex is shared across clones, so the `todo` tool
+  and a UI click can't drop each other's items. The tool reads (`list`,
+  `show`) are `Safe`; every mutation is `NeedsApproval(TodoWrite { list })`
+  (ADR-016) and audited. `/api/todos*` is owner-only (no card) and a missing
+  list/item is a plain 404 (`todo_error`), not the provider-flavored 502.
+  Lists are never injected into the prompt (ADR-029).
 - **Context budget** (`context.rs`, ADR-018) is deterministic (~4 chars/token)
   and runs *before* the provider call: drop-oldest window + rolling summary.
   The last message is always kept even when it alone exceeds the budget, and

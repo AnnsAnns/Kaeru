@@ -713,8 +713,36 @@ body {
   min-width: 24px;
   min-height: 24px;
 }
-.action-btn.attach {
-  min-width: 44px;
+/* Regenerate + attach stacked into one square to save a composer column. */
+.composer-side {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  width: 44px;
+  min-height: 44px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--box-color-standard);
+  box-shadow: 4px 4px 0 0 color-mix(in srgb, var(--box-color-standard) 50%, transparent);
+}
+.side-btn {
+  flex: 1 1 0;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  color: var(--base-background-color);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+.side-btn + .side-btn {
+  border-top: 1px solid color-mix(in srgb, var(--base-background-color) 45%, transparent);
+}
+.side-btn:active {
+  background: color-mix(in srgb, var(--base-background-color) 25%, transparent);
 }
 .artifacts {
   display: flex;

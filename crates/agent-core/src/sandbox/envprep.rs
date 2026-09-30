@@ -79,8 +79,8 @@ pub fn prepared(envs: &Path, deps: &[String]) -> bool {
 /// Prepare (or reuse) the environment for `deps`.
 ///
 /// Reuse is checked first, so a cached dep set performs no work and no
-/// network access. A failed install leaves no marker and no env: the next
-/// consented attempt starts clean.
+/// network access. A failed install leaves no marker and no env (the staging
+/// dir is removed on the way out): the next consented attempt starts clean.
 pub async fn prepare(envs: &Path, python: &Path, deps: &[String]) -> Result<EnvId> {
     let deps = normalize_deps(deps);
     if deps.is_empty() {
@@ -99,27 +99,12 @@ pub async fn prepare(envs: &Path, python: &Path, deps: &[String]) -> Result<EnvI
     let cache = envs.join(".cache");
     let _ = tokio::fs::remove_dir_all(&tmp).await;
 
-    let mut venv_args: Vec<OsString> = vec![
-        "venv".into(),
-        "--python".into(),
-        python.as_os_str().to_owned(),
-    ];
-    venv_args.push(tmp.as_os_str().to_owned());
-    run_uv(&venv_args, "uv venv", &cache).await?;
-
-    let mut install_args: Vec<OsString> = vec![
-        "pip".into(),
-        "install".into(),
-        "--python".into(),
-        tmp.join("bin/python").into_os_string(),
-        "--".into(),
-    ];
-    install_args.extend(deps.iter().map(OsString::from));
-    run_uv(&install_args, "uv pip install", &cache).await?;
-
-    tokio::fs::write(tmp.join(COMPLETE_MARKER), b"")
-        .await
-        .map_err(|e| ApiError::internal(format!("cannot mark env complete: {e}")))?;
+    // Any failure (venv, install, marker) removes the staging dir so a
+    // half-built env never lingers.
+    if let Err(err) = build_env(&tmp, python, &deps, &cache).await {
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        return Err(err);
+    }
     match tokio::fs::rename(&tmp, &target).await {
         Ok(()) => Ok(id),
         // Another attempt won the race (checked above under the caller's
@@ -136,6 +121,33 @@ pub async fn prepare(envs: &Path, python: &Path, deps: &[String]) -> Result<EnvI
             )))
         }
     }
+}
+
+/// Build the env in the staging dir: venv, install, completion marker. Any
+/// failure leaves `tmp` for the caller to remove.
+async fn build_env(tmp: &Path, python: &Path, deps: &[String], cache: &Path) -> Result<()> {
+    let mut venv_args: Vec<OsString> = vec![
+        "venv".into(),
+        "--python".into(),
+        python.as_os_str().to_owned(),
+    ];
+    venv_args.push(tmp.as_os_str().to_owned());
+    run_uv(&venv_args, "uv venv", cache).await?;
+
+    let mut install_args: Vec<OsString> = vec![
+        "pip".into(),
+        "install".into(),
+        "--python".into(),
+        tmp.join("bin/python").into_os_string(),
+        "--".into(),
+    ];
+    install_args.extend(deps.iter().map(OsString::from));
+    run_uv(&install_args, "uv pip install", cache).await?;
+
+    tokio::fs::write(tmp.join(COMPLETE_MARKER), b"")
+        .await
+        .map_err(|e| ApiError::internal(format!("cannot mark env complete: {e}")))?;
+    Ok(())
 }
 
 /// Run one uv subprocess with a hard timeout and bounded error reporting.
@@ -227,5 +239,33 @@ mod tests {
             .block_on(prepare(&envs, Path::new("/nonexistent/python"), &deps))
             .unwrap();
         assert_eq!(prepared_id, id);
+    }
+
+    #[tokio::test]
+    async fn a_failed_install_leaves_no_staging_dir_behind() {
+        // Needs `uv` on PATH but no network: the venv step fails fast on the
+        // nonexistent interpreter. Skipped where uv is absent.
+        let uv_ok = std::process::Command::new("uv")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !uv_ok {
+            eprintln!("skipping: uv is not available on this host");
+            return;
+        }
+        let envs = temp_dir("env", "failed-install");
+        let deps = vec!["pandas".to_owned()];
+        let id = env_id(&deps);
+        let result = prepare(&envs, Path::new("/nonexistent/python3"), &deps).await;
+        assert!(result.is_err(), "a missing interpreter must fail");
+        assert!(
+            !envs
+                .join(format!(".{}.tmp-{}", id.as_str(), std::process::id()))
+                .exists(),
+            "the staging dir must be removed after a failed install"
+        );
+        assert!(!envs.join(id.as_str()).exists());
+        std::fs::remove_dir_all(&envs).ok();
     }
 }

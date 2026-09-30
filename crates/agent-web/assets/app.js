@@ -40,6 +40,41 @@
   const attachBtn = $("attach-btn");
   const fileInput = $("file-input");
   const attachmentsEl = $("attachments");
+  const settingsBtn = $("settings-btn");
+  const backdrop = $("backdrop");
+
+  /* ---------- panels: one open at a time (drawers on mobile) ---------- */
+
+  const PANELS = {
+    sidebar: threadsBtn,
+    memory: memoryBtn,
+    todo: todoBtn,
+    settings: settingsBtn,
+  };
+
+  function setPanel(name) {
+    for (const [panel, button] of Object.entries(PANELS)) {
+      const open = panel === name;
+      workspaceEl.classList.toggle(`${panel}-open`, open);
+      button.setAttribute("aria-expanded", String(open));
+    }
+    backdrop.hidden = !name;
+  }
+  function togglePanel(name) {
+    setPanel(workspaceEl.classList.contains(`${name}-open`) ? null : name);
+  }
+  function closePanels() {
+    setPanel(null);
+  }
+
+  backdrop.addEventListener("click", closePanels);
+  addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closePanels();
+  });
+  // The ✕ in each drawer's title bar (mobile only; hidden on desktop).
+  workspaceEl.addEventListener("click", (event) => {
+    if (event.target.closest("[data-close]")) closePanels();
+  });
 
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
@@ -500,6 +535,8 @@
     }
     if (!response.ok) throw await readApiError(response);
     renderThread(await response.json());
+    // Selecting a thread from the drawer should reveal the chat.
+    closePanels();
   }
 
   async function createThread() {
@@ -1123,10 +1160,8 @@
   newThreadBtn.addEventListener("click", () => {
     createThread().catch(reportError);
   });
-  threadsBtn.addEventListener("click", () => {
-    const open = workspaceEl.classList.toggle("sidebar-open");
-    threadsBtn.setAttribute("aria-expanded", String(open));
-  });
+  threadsBtn.addEventListener("click", () => togglePanel("sidebar"));
+  settingsBtn.addEventListener("click", () => togglePanel("settings"));
 
   /* ---------- memory browser (M4) ---------- */
 
@@ -1172,9 +1207,8 @@
   }
 
   memoryBtn.addEventListener("click", () => {
-    const open = workspaceEl.classList.toggle("memory-open");
-    memoryBtn.setAttribute("aria-expanded", String(open));
-    if (open) {
+    togglePanel("memory");
+    if (workspaceEl.classList.contains("memory-open")) {
       loadMemory(memoryQueryEl.value.trim()).catch(reportError);
     }
   });
@@ -1361,9 +1395,10 @@
   }
 
   todoBtn.addEventListener("click", () => {
-    const open = workspaceEl.classList.toggle("todo-open");
-    todoBtn.setAttribute("aria-expanded", String(open));
-    if (open) loadTodoLists().catch(reportError);
+    togglePanel("todo");
+    if (workspaceEl.classList.contains("todo-open")) {
+      loadTodoLists().catch(reportError);
+    }
   });
   todoListSelect.addEventListener("change", () => {
     state.todoSlug = todoListSelect.value;
@@ -1416,8 +1451,12 @@
   function syncEffortSelect() {
     const levels = state.modelEffort[state.model]?.levels || [];
     effortSelect.replaceChildren();
+    // Hide the whole labelled field, not just the select (a bare label looks
+    // broken in the Settings drawer).
+    const field = effortSelect.closest(".field");
     if (!levels.length) {
       effortSelect.hidden = true;
+      if (field) field.hidden = true;
       state.reasoningEffort = null;
       return;
     }
@@ -1438,6 +1477,7 @@
       state.reasoningEffort = null;
     }
     effortSelect.hidden = false;
+    if (field) field.hidden = false;
   }
 
   async function loadModels() {

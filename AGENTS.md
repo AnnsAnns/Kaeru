@@ -228,6 +228,13 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   base-background-color`, `ring-4` box color, `rounded-sm`, and a hard `8px
   8px` offset shadow; user messages locally re-skin `--box-color-standard` to
   the `hot-pink` accent so ring/shadow/title bar recolor from one variable.
+- **Mobile chrome (v0.21):** the top bar is a single row of icon buttons and
+  model/effort/theme/usage live in the **Settings** drawer. On `<900px` the
+  threads/memory/TODO/settings panels are off-canvas drawers
+  (`.workspace.<x>-open` + `#backdrop`), toggled by `setPanel()` in `app.js`,
+  which keeps exactly one open; `>=900px` turns them back into inline columns
+  with the threads sidebar permanent. Don't reintroduce the old wrapping header
+  chips or inline panels on mobile — they squeezed the chat column.
 
 ## Testing
 

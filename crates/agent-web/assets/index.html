@@ -9,37 +9,28 @@
 </head>
 <body>
   <div id="app">
-    <header class="box header-box">
-      <div class="box-title">
-        <span class="title-label">Settings</span>
-        <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
-      </div>
-      <h1 class="app-name">Kaeru 🐸</h1>
-      <div class="header-controls">
-        <button id="threads-btn" class="chip" type="button" title="Toggle threads" aria-expanded="false">🧵 Threads</button>
-        <button id="memory-btn" class="chip" type="button" title="Toggle memory" aria-expanded="false">🗒️ Memory</button>
-        <button id="todo-btn" class="chip" type="button" title="Toggle TODO lists" aria-expanded="false">✅ TODO</button>
-        <button id="theme-btn" class="chip" type="button" title="Cycle theme">
-          <span aria-hidden="true">🎨 Theme:</span> <br /> <span id="theme-name">latenightbath</span>
-        </button>
-        <label class="model-wrap">
-          <span class="visually-hidden">Model</span>
-          <select id="model-select" class="chip model-chip" title="Model for the next message"></select>
-        </label>
-        <label class="model-wrap">
-          <span class="visually-hidden">Reasoning effort</span>
-          <select id="effort-select" class="chip model-chip" title="Reasoning effort for the next message" hidden></select>
-        </label>
-        <span id="fake-badge" class="chip fake-badge" hidden>fake provider</span>
-        <span id="usage-badge" class="chip usage-badge" hidden></span>
+    <header class="box topbar">
+      <button id="threads-btn" class="icon-btn" type="button" title="Threads"
+        aria-label="Threads" aria-expanded="false">🧵</button>
+      <h1 class="app-name">Kaeru <span aria-hidden="true">🐸</span></h1>
+      <span id="fake-badge" class="badge fake-badge" hidden>fake</span>
+      <div class="topbar-actions">
+        <button id="todo-btn" class="icon-btn" type="button" title="TODO lists"
+          aria-label="TODO lists" aria-expanded="false">✅</button>
+        <button id="memory-btn" class="icon-btn" type="button" title="Memory"
+          aria-label="Memory" aria-expanded="false">🗒️</button>
+        <button id="settings-btn" class="icon-btn" type="button" title="Settings"
+          aria-label="Settings" aria-expanded="false">⚙️</button>
       </div>
     </header>
 
     <div class="workspace" id="workspace">
+      <div id="backdrop" class="backdrop" hidden></div>
+
       <aside id="sidebar" class="box sidebar" aria-label="Threads">
         <div class="box-title">
           <span class="title-label">Threads</span>
-          <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
+          <button class="panel-close" type="button" data-close aria-label="Close threads">✕</button>
         </div>
         <button id="new-thread-btn" class="action-btn new-thread" type="button">+ new thread</button>
         <ul id="thread-list" class="thread-list"></ul>
@@ -50,7 +41,7 @@
       <aside id="memory-panel" class="box memory-panel" aria-label="Memory">
         <div class="box-title">
           <span class="title-label">Memory</span>
-          <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
+          <button class="panel-close" type="button" data-close aria-label="Close memory">✕</button>
         </div>
         <form id="memory-search" class="memory-search">
           <input id="memory-query" type="search" placeholder="search memory…"
@@ -67,7 +58,7 @@
       <aside id="todo-panel" class="box todo-panel" aria-label="TODO lists">
         <div class="box-title">
           <span class="title-label">TODO</span>
-          <span class="title-chrome" aria-hidden="true">➖ ⏹️ ❌</span>
+          <button class="panel-close" type="button" data-close aria-label="Close TODO">✕</button>
         </div>
         <form id="todo-new-list" class="todo-new-list">
           <input id="todo-new-list-input" type="text" placeholder="new list…"
@@ -85,6 +76,25 @@
           <button type="submit" class="action-btn">add</button>
         </form>
         <ul id="todo-items" class="todo-items"></ul>
+      </aside>
+
+      <aside id="settings-panel" class="box settings-panel" aria-label="Settings">
+        <div class="box-title">
+          <span class="title-label">Settings</span>
+          <button class="panel-close" type="button" data-close aria-label="Close settings">✕</button>
+        </div>
+        <label class="field">
+          <span class="field-label">Model</span>
+          <select id="model-select" class="chip model-chip" title="Model for the next message"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">Reasoning effort</span>
+          <select id="effort-select" class="chip model-chip" title="Reasoning effort for the next message" hidden></select>
+        </label>
+        <button id="theme-btn" class="chip theme-chip" type="button" title="Cycle theme">
+          🎨 <span id="theme-name">latenightbath</span>
+        </button>
+        <span id="usage-badge" class="badge usage-badge" hidden></span>
       </aside>
     </div>
 

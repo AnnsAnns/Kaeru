@@ -150,27 +150,48 @@ body {
   height: 100dvh;
   max-width: 1100px;
   margin: 0 auto;
-  padding: 4px;
+  /* Respect notches / home indicator (viewport-fit=cover). */
+  padding: max(4px, env(safe-area-inset-top)) max(4px, env(safe-area-inset-right))
+    max(4px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
 }
-.header-box {
+
+/* ---- top bar: one compact row. Model/theme/usage live in the Settings
+   drawer so the bar never wraps on a phone (C8). ---- */
+.topbar {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin: 0 0 6px;
 }
 .app-name {
   font-family: var(--font-headerf);
   font-weight: normal;
-  font-size: clamp(30px, 7vw, 44px);
+  font-size: clamp(19px, 5.5vw, 26px);
   line-height: 1;
   margin: 0;
-  padding-top: 8px;
+  white-space: nowrap;
 }
-.header-controls {
+.topbar-actions {
+  margin-left: auto;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   align-items: center;
-  padding-bottom: 4px;
+  gap: 2px;
+}
+.icon-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.icon-btn[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--box-color-standard) 55%, transparent);
 }
 .chip {
   background: var(--base-background-color);
@@ -184,17 +205,21 @@ body {
   cursor: pointer;
   box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--box-color-standard) 60%, transparent);
 }
-.model-wrap {
-  max-width: 46vw;
-}
 .model-chip {
   max-width: 100%;
   text-overflow: ellipsis;
 }
+.badge {
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--box-color-standard) 45%, transparent);
+  white-space: nowrap;
+}
 .fake-badge {
   background: var(--accent-color);
   color: var(--accent-contrast-color);
-  box-shadow: none;
 }
 
 /* ---- workspace: sidebar + messages ---- */
@@ -216,18 +241,65 @@ body {
   scrollbar-color: var(--box-color-standard) var(--base-bd-background-color);
 }
 
-/* ---- thread sidebar ---- */
-.sidebar {
-  display: none;
-  flex-direction: column;
-  width: 260px;
-  flex: 0 0 260px;
-  align-self: flex-start;
-  max-height: 100%;
-  overflow-y: auto;
-}
-.workspace.sidebar-open .sidebar {
+/* ---- panels: off-canvas drawers on mobile, columns on desktop.
+   Mobile-first: each panel is a fixed drawer that slides in over the chat
+   (which keeps full width) behind a tap-to-close backdrop. Only one is open
+   at a time (JS enforces it). On >=900px they become inline columns and the
+   threads sidebar is permanent. ---- */
+.sidebar,
+.memory-panel,
+.todo-panel,
+.settings-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  z-index: 30;
+  width: min(86vw, 340px);
+  margin: 0;
+  border-radius: 0;
+  /* Keep the drawer's title bar and last row clear of notches / home bar. */
+  padding-top: max(0px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
   display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s linear 0.2s;
+}
+.sidebar {
+  left: 0;
+  transform: translateX(-102%);
+}
+.memory-panel,
+.todo-panel,
+.settings-panel {
+  right: 0;
+  transform: translateX(102%);
+}
+.workspace.sidebar-open .sidebar,
+.workspace.memory-open .memory-panel,
+.workspace.todo-open .todo-panel,
+.workspace.settings-open .settings-panel {
+  visibility: visible;
+  transform: translateX(0);
+  transition: transform 0.2s ease, visibility 0s;
+}
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--base-text-color) 42%, transparent);
+}
+.backdrop[hidden] {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .memory-panel,
+  .todo-panel,
+  .settings-panel {
+    transition: none;
+  }
 }
 .new-thread {
   margin: 10px 0 4px;
@@ -691,29 +763,46 @@ body {
   background: color-mix(in srgb, var(--base-bd-background-color) 60%, transparent);
 }
 
-/* ---- desktop: sidebar is a permanent column ---- */
+/* ---- desktop: panels are inline columns; threads is permanent ---- */
 @media (min-width: 900px) {
+  .sidebar,
+  .memory-panel,
+  .todo-panel,
+  .settings-panel {
+    position: static;
+    z-index: auto;
+    width: auto;
+    flex: 0 0 280px;
+    max-height: 100%;
+    margin: 4px;
+    border-radius: 4px;
+    align-self: flex-start;
+    visibility: visible;
+    transform: none;
+    transition: none;
+  }
   .sidebar {
     display: flex;
   }
-  .workspace.sidebar-open .sidebar {
+  .memory-panel,
+  .todo-panel,
+  .settings-panel {
+    display: none;
+  }
+  .workspace.memory-open .memory-panel,
+  .workspace.todo-open .todo-panel,
+  .workspace.settings-open .settings-panel {
     display: flex;
+  }
+  .backdrop {
+    display: none;
+  }
+  #threads-btn {
+    display: none;
   }
 }
 
 /* ---- memory browser (M4) ---- */
-.memory-panel {
-  display: none;
-  flex-direction: column;
-  width: 300px;
-  flex: 0 0 300px;
-  align-self: flex-start;
-  max-height: 100%;
-  overflow-y: auto;
-}
-.workspace.memory-open .memory-panel {
-  display: flex;
-}
 .memory-search {
   display: flex;
   gap: 6px;
@@ -772,18 +861,6 @@ body {
 }
 
 /* ---- TODO lists (M7) ---- */
-.todo-panel {
-  display: none;
-  flex-direction: column;
-  width: 300px;
-  flex: 0 0 300px;
-  align-self: flex-start;
-  max-height: 100%;
-  overflow-y: auto;
-}
-.workspace.todo-open .todo-panel {
-  display: flex;
-}
 .todo-new-list,
 .todo-new-item {
   display: flex;
@@ -849,4 +926,88 @@ body {
 .todo-empty-row {
   font-size: 12px;
   opacity: 0.7;
+}
+
+/* ---- settings drawer (model / reasoning / theme / usage) ---- */
+.settings-panel .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+.settings-panel .field[hidden] {
+  display: none;
+}
+.field-label {
+  font-size: 12px;
+  opacity: 0.75;
+}
+.settings-panel select,
+.settings-panel .theme-chip {
+  width: 100%;
+}
+.theme-chip {
+  text-align: left;
+}
+.settings-panel .badge {
+  display: inline-block;
+  margin-top: 4px;
+}
+
+/* Close affordance for the mobile drawers; hidden on desktop. */
+.panel-close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.panel-close:hover {
+  background: color-mix(in srgb, var(--base-background-color) 25%, transparent);
+}
+
+/* ---- mobile refinements: reclaim every pixel (C8) ----
+   Last in the file so these win over the component rules above. */
+@media (max-width: 899.98px) {
+  /* Flatten the hard offset shadows; on a phone they read as clutter and
+     push boxes past the right edge. The ring stays. */
+  .box {
+    margin: 3px;
+    box-shadow: 0 0 0 3px var(--box-color-standard);
+  }
+  /* Panels are full-bleed drawers: no margin or rounding. */
+  .sidebar,
+  .memory-panel,
+  .todo-panel,
+  .settings-panel {
+    margin: 0;
+    border-radius: 0;
+  }
+  /* Drop the decorative title-bar chrome and the forced box heights. */
+  .title-chrome {
+    display: none;
+  }
+  .panel-close {
+    display: inline-flex;
+  }
+  .msg,
+  .composer-box {
+    min-height: 0;
+  }
+  /* Slimmer composer buttons leave more room for the text on a small phone. */
+  .composer-row {
+    gap: 6px;
+  }
+  .composer-row .action-btn {
+    min-width: 48px;
+    font-size: 14px;
+  }
 }

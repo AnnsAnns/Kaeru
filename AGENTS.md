@@ -236,9 +236,12 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   model/effort/theme/usage live in the **Settings** drawer. On `<900px` the
   threads/memory/TODO/settings panels are off-canvas drawers
   (`.workspace.<x>-open` + `#backdrop`), toggled by `setPanel()` in `app.js`,
-  which keeps exactly one open; `>=900px` turns them back into inline columns
-  with the threads sidebar permanent. Don't reintroduce the old wrapping header
-  chips or inline panels on mobile — they squeezed the chat column.
+  which keeps exactly one open. On `>=900px` the threads sidebar is a permanent
+  inline column, while memory/TODO/settings open as **fixed panels in the empty
+  gutter to the right of the centred 1100px `#app`** — out of flow, so the chat
+  column is never squeezed (they only overlap the app's right edge on narrower
+  desktops). Don't reintroduce the old wrapping header chips, and don't make the
+  right-side panels inline columns again — that squished the chat output.
 
 ## Testing
 

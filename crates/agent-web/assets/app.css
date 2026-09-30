@@ -244,8 +244,9 @@ body {
 /* ---- panels: off-canvas drawers on mobile, columns on desktop.
    Mobile-first: each panel is a fixed drawer that slides in over the chat
    (which keeps full width) behind a tap-to-close backdrop. Only one is open
-   at a time (JS enforces it). On >=900px they become inline columns and the
-   threads sidebar is permanent. ---- */
+   at a time (JS enforces it). On >=900px the threads sidebar becomes a
+   permanent inline column while memory/TODO/settings open as fixed panels in
+   the gutter beside the centred app, so they never squeeze the chat. ---- */
 .sidebar,
 .memory-panel,
 .todo-panel,
@@ -797,12 +798,13 @@ body {
   background: color-mix(in srgb, var(--base-bd-background-color) 60%, transparent);
 }
 
-/* ---- desktop: panels are inline columns; threads is permanent ---- */
+/* ---- desktop: threads stays an inline column; memory/TODO/settings open
+   in the empty gutter to the RIGHT of the centred app column. Because #app
+   is capped at 1100px there is usually room beside it, so the panels are
+   position: fixed (out of flow) and the chat never reflows/squeezes. On
+   narrower desktops they simply overlap the app's right edge. ---- */
 @media (min-width: 900px) {
-  .sidebar,
-  .memory-panel,
-  .todo-panel,
-  .settings-panel {
+  .sidebar {
     position: static;
     z-index: auto;
     width: auto;
@@ -814,13 +816,26 @@ body {
     visibility: visible;
     transform: none;
     transition: none;
-  }
-  .sidebar {
     display: flex;
   }
   .memory-panel,
   .todo-panel,
   .settings-panel {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    left: auto;
+    z-index: 30;
+    width: 280px;
+    max-width: calc(100vw - 16px);
+    max-height: none;
+    margin: 0;
+    border-radius: 4px;
+    align-self: auto;
+    visibility: visible;
+    transform: none;
+    transition: none;
     display: none;
   }
   .workspace.memory-open .memory-panel,

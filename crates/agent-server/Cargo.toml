@@ -1,0 +1,22 @@
+[package]
+name = "agent-server"
+description = "Kaeru shared server library: the axum /api/* surface (serialized CoreEvent/consent API), the embedded web UI, and the boot wiring shared by the server binaries (M6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core = { workspace = true }
+axum = { workspace = true }
+pulldown-cmark = { workspace = true }
+rust-embed = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tower = { workspace = true }

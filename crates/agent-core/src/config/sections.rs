@@ -278,6 +278,18 @@ impl Default for FilesConfig {
     }
 }
 
+/// Daemon bind configuration (M6, ADR-030). Used only by `agent-daemon`:
+/// empty `bind` means localhost (`127.0.0.1:port`); the only other allowed
+/// addresses are tailnet ones, and those require an auth token. The policy
+/// itself is enforced at bind time in `agent-server` (`bind.rs`), not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// Bind address for `agent-daemon` (`host:port`); empty = localhost.
+    #[serde(default)]
+    pub bind: String,
+}
+
 /// Worker registry configuration (the summarizer, M3; the distiller, M4; the
 /// reflector, M4.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,13 @@
+[package]
+name = "agent-daemon"
+description = "Kaeru daemon (M6): owns agent-core + data/, serves the shared API + web UI to thin frontends; localhost or tailnet bind (ADR-030)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agent-daemon"
+path = "src/main.rs"
+
+[dependencies]
+agent-server = { workspace = true }

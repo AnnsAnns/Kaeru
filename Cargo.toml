@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agent-core", "crates/agent-web"]
+members = ["crates/agent-core", "crates/agent-server", "crates/agent-web", "crates/agent-daemon"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 agent-core = { path = "crates/agent-core" }
+agent-server = { path = "crates/agent-server" }
 axum = "0.8"
 http-body-util = "0.1"
 libc = "0.2"

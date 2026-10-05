@@ -174,6 +174,15 @@ fn reflect_config_defaults_off_and_normalizes_time() {
 }
 
 #[test]
+fn daemon_bind_defaults_empty_and_is_trimmed() {
+    let config = Config::parse("[provider]\nmodel = \"m\"\n").unwrap();
+    assert_eq!(config.daemon.bind, "");
+
+    let config = Config::parse("[daemon]\nbind = \" 100.64.0.1:8080 \"\n").unwrap();
+    assert_eq!(config.daemon.bind, "100.64.0.1:8080");
+}
+
+#[test]
 fn load_creates_default_file_with_tight_permissions() {
     let dir = temp_dir("test", "load-default");
     let path = dir.join("data/config.toml");

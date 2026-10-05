@@ -76,6 +76,23 @@
     if (event.target.closest("[data-close]")) closePanels();
   });
 
+  // Desktop panels are fixed in the right gutter; anchor their top just below
+  // the top bar (like the inline thread column) so an open panel never covers
+  // the buttons that toggle it. The bar's height is content-driven, so measure
+  // the workspace top and re-measure when the viewport or fonts change.
+  function syncPanelTop() {
+    const top = workspaceEl.getBoundingClientRect().top + 4;
+    document.documentElement.style.setProperty(
+      "--panel-top",
+      `${Math.round(top)}px`,
+    );
+  }
+  syncPanelTop();
+  addEventListener("resize", syncPanelTop);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(syncPanelTop);
+  }
+
   // Bort's theme cycle order (themes.ts enum); CSS additionally ships "trans".
   const THEMES = [
     "latenightbath",

@@ -17,7 +17,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-web"
+name = "agent-daemon"
+version = "0.1.0"
+dependencies = [
+ "agent-server",
+]
+
+[[package]]
+name = "agent-server"
 version = "0.1.0"
 dependencies = [
  "agent-core",
@@ -32,6 +39,13 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-web"
+version = "0.1.0"
+dependencies = [
+ "agent-server",
 ]
 
 [[package]]

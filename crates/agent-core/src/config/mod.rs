@@ -7,8 +7,9 @@ mod sections;
 mod tests;
 
 pub use sections::{
-    AgentConfig, ContextConfig, FilesConfig, ProviderConfig, ReflectConfig, ReflectorWorkerConfig,
-    SandboxConfig, SearchConfig, SearchProviderKind, WorkerConfig, WorkersConfig,
+    AgentConfig, ContextConfig, DaemonConfig, FilesConfig, ProviderConfig, ReflectConfig,
+    ReflectorWorkerConfig, SandboxConfig, SearchConfig, SearchProviderKind, WorkerConfig,
+    WorkersConfig,
 };
 
 use std::path::{Path, PathBuf};
@@ -46,7 +47,9 @@ pub const DEFAULT_MAX_UPLOAD_MB: u64 = 50;
 const DEFAULT_CONFIG_TOML: &str = r##"# Kaeru configuration. This file holds your provider API key:
 # keep it private (it is written with 0600 permissions and git-ignored).
 
-# Local port the web UI binds to. The server ALWAYS binds to 127.0.0.1 only.
+# Local port the server binds to. `agent-web` ALWAYS binds 127.0.0.1;
+# `agent-daemon` binds localhost by default and may bind a tailnet address
+# (see [daemon] below).
 port = 8080
 
 # Shared secret required as the `X-Auth-Token` header on every /api/* request.
@@ -144,6 +147,14 @@ memory_mb = 512
 [files]
 # Size cap for uploads into the workspace (`POST /api/files`).
 max_upload_mb = 50
+
+# M6 (ADR-030): where `agent-daemon` binds. Empty = 127.0.0.1:port (localhost
+# only). The only other allowed values are tailnet addresses (Tailscale:
+# 100.64.0.0/10 or fd7a:115e:a297::/48), e.g. "100.x.y.z:8080" — never a
+# public address or 0.0.0.0 — and a non-localhost bind requires auth_token
+# above (the daemon refuses to start without one). Ignored by `agent-web`.
+[daemon]
+bind = ""
 "##;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +180,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub files: FilesConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 fn default_port() -> u16 {
     DEFAULT_PORT
@@ -186,6 +199,7 @@ impl Default for Config {
             reflect: ReflectConfig::default(),
             sandbox: SandboxConfig::default(),
             files: FilesConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -330,6 +344,7 @@ impl Config {
         if config.files.max_upload_mb == 0 {
             config.files.max_upload_mb = DEFAULT_MAX_UPLOAD_MB;
         }
+        config.daemon.bind = config.daemon.bind.trim().to_owned();
         if config.provider.base_url.is_empty() {
             return Err(ApiError::config("[provider] base_url must not be empty"));
         }

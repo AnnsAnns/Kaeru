@@ -802,7 +802,9 @@ body {
    in the empty gutter to the RIGHT of the centred app column. Because #app
    is capped at 1100px there is usually room beside it, so the panels are
    position: fixed (out of flow) and the chat never reflows/squeezes. On
-   narrower desktops they simply overlap the app's right edge. ---- */
+   narrower desktops they simply overlap the app's right edge. They start
+   below the top bar (--panel-top, measured in JS) so they never cover the
+   buttons that toggle them, matching the inline thread column. ---- */
 @media (min-width: 900px) {
   .sidebar {
     position: static;
@@ -822,7 +824,7 @@ body {
   .todo-panel,
   .settings-panel {
     position: fixed;
-    top: 8px;
+    top: var(--panel-top, 78px);
     right: 8px;
     bottom: 8px;
     left: auto;

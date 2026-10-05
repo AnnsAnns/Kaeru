@@ -1,0 +1,25 @@
+[package]
+name = "agent-frog"
+description = "Kaeru Wayland desktop frog (M6 thin frontend): a small always-on-top 🐸 widget for quick questions over the daemon API (localhost or tailnet, ADR-030)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agent-frog"
+path = "src/main.rs"
+
+[dependencies]
+async-channel = { workspace = true }
+gtk = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

@@ -1,0 +1,174 @@
+/* agent-frog stylesheet template (M6, ADR-031). `%TOKEN%` placeholders are
+   filled from the Bort theme table in theme.rs; GTK4 CSS has no custom
+   properties, so the whole sheet is regenerated per theme. */
+
+window,
+window.background,
+.frog-root,
+.frog-panel,
+.frog-scroll,
+.frog-scroll > viewport,
+.frog-scroll > undershoot,
+.frog-messages,
+scrolledwindow,
+scrolledwindow > viewport {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+}
+
+/* Adwaita paints buttons with a gradient; clear it so our flat colours show. */
+button {
+  background-image: none;
+  box-shadow: none;
+}
+
+/* ---- the always-visible avatar (the frog itself) ---- */
+.frog-avatar {
+  font-size: 30px;
+  min-width: 52px;
+  min-height: 52px;
+  padding: 0;
+  background-color: %BG%;
+  background-image: none;
+  color: %TEXT%;
+  border: 3px solid %BOX%;
+  border-radius: 6px;
+  box-shadow: 5px 5px 0 0 %BOX50%;
+}
+.frog-avatar:hover {
+  border-color: %ACCENT%;
+  box-shadow: 5px 5px 0 0 %ACCENT50%;
+}
+
+/* ---- Bort box recipe: bg, ring, rounded-sm, hard offset shadow ---- */
+.card {
+  background-color: %BG%;
+  color: %TEXT%;
+  border: 3px solid %BOX%;
+  border-radius: 4px;
+  box-shadow: 6px 6px 0 0 %BOX50%;
+}
+.card.you {
+  border-color: %ACCENT%;
+  box-shadow: 6px 6px 0 0 %ACCENT50%;
+}
+.card.error {
+  border-color: %ERROR%;
+  box-shadow: 6px 6px 0 0 %ERROR50%;
+}
+.card-title {
+  background-color: %BOX%;
+  color: %BG%;
+  font-family: "Reglisse Fill", "National Park", sans-serif;
+  font-size: 13px;
+  padding: 3px 8px;
+}
+.card.you .card-title {
+  background-color: %ACCENT%;
+}
+.card.error .card-title {
+  background-color: %ERROR%;
+}
+.card-body {
+  font-size: 15px;
+  padding: 6px 8px;
+}
+
+/* ---- panel chrome ---- */
+.panel-title {
+  font-family: "Reglisse Fill", "National Park", sans-serif;
+  font-size: 16px;
+  color: %TEXT%;
+}
+.status {
+  font-size: 11px;
+  color: %TEXT%;
+  opacity: 0.75;
+}
+
+/* The scrolled window's scrollbar: themed, and given an explicit minimum so
+   GTK never measures a negative slider. */
+scrollbar {
+  background-color: transparent;
+  border: none;
+}
+scrollbar slider {
+  min-width: 6px;
+  min-height: 6px;
+  background-color: %BOX60%;
+  border-radius: 3px;
+}
+.icon-btn {
+  font-size: 15px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  background-color: transparent;
+  color: %TEXT%;
+  border: none;
+  border-radius: 4px;
+}
+.icon-btn:hover {
+  background-color: %BOX50%;
+}
+
+/* ---- buttons / entry ---- */
+button.action {
+  font-family: "Reglisse Fill", "National Park", sans-serif;
+  font-size: 15px;
+  padding: 6px 12px;
+  background-color: %BOX%;
+  color: %BG%;
+  border: none;
+  border-radius: 4px;
+  box-shadow: 3px 3px 0 0 %BOX50%;
+}
+button.action:hover {
+  background-color: %ACCENT%;
+}
+button.action:active {
+  box-shadow: 1px 1px 0 0 %BOX50%;
+}
+button.stop {
+  background-color: %ACCENT%;
+  box-shadow: 3px 3px 0 0 %ACCENT50%;
+}
+button.stop:hover {
+  background-color: %ERROR%;
+}
+entry.frog-entry {
+  background-color: %BG%;
+  color: %TEXT%;
+  border: 2px solid %BOX%;
+  border-radius: 4px;
+  padding: 6px 8px;
+  min-height: 24px;
+}
+entry.frog-entry:focus {
+  border-color: %ACCENT%;
+}
+entry.frog-entry:disabled {
+  opacity: 0.6;
+}
+
+/* ---- streaming + tool/reasoning lines ---- */
+.reasoning {
+  font-size: 12px;
+  color: %TEXT%;
+  opacity: 0.85;
+}
+.tool-line {
+  font-size: 12px;
+  color: %TEXT%;
+  opacity: 0.8;
+}
+.approval {
+  border: 2px solid %ACCENT%;
+  border-radius: 2px;
+  padding: 8px;
+  background-color: %BDBG%;
+}
+.approval-text {
+  font-size: 13px;
+}

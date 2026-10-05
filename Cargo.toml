@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/agent-core", "crates/agent-server", "crates/agent-daemon"]
+members = [
+    "crates/agent-core",
+    "crates/agent-server",
+    "crates/agent-daemon",
+    "crates/agent-frog",
+]
+# The GUI frontend needs GTK4 + gtk4-layer-shell, which CI and headless hosts do
+# not necessarily have. Keep it a workspace member (shared lockfile + `-p
+# agent-frog`) but out of the default build set, so `cargo test`/`cargo build`
+# stay headless-friendly (ADR-031). Build it explicitly with `-p agent-frog`.
+default-members = ["crates/agent-core", "crates/agent-server", "crates/agent-daemon"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +20,10 @@ license = "MIT"
 [workspace.dependencies]
 agent-core = { path = "crates/agent-core" }
 agent-server = { path = "crates/agent-server" }
+async-channel = "2"
 axum = "0.8"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+gtk4-layer-shell = "0.8"
 http-body-util = "0.1"
 libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }

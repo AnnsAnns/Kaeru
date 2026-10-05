@@ -15,6 +15,8 @@ Being a personal fun project also means that I will make breaking changes withou
 The main frontend is a localhost web UI that streams from any OpenAI-compatible provider (OpenRouter, Ollama,
 LM Studio, vLLM, llama.cpp).
 
+A second frontend, the **Wayland desktop frog** (`cargo run -p agent-frog`), is a small always-on-top 🐸 widget for quick questions — click it to expand a streaming chat, drag it to move it. It is a thin client of the same daemon API and can point at a tailnet address; it needs GTK4 + `gtk4-layer-shell` on the host.
+
 ## Getting Started
 
 Simply running `cargo run` (or `cargo run -p agent-daemon`) is enough — the daemon owns the core and serves the web UI. You can also pass `--fake` if you want to run the keyless demo UI.

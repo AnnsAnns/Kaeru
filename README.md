@@ -17,10 +17,12 @@ LM Studio, vLLM, llama.cpp).
 
 ## Getting Started
 
-Simply running `cargo run` is enough, you can also pass `--fake` if you want to run the keyless demo UI.
+Simply running `cargo run` (or `cargo run -p agent-daemon`) is enough — the daemon owns the core and serves the web UI. You can also pass `--fake` if you want to run the keyless demo UI.
 You can also trigger quite a few tests via `cargo test` because LLMs really love writing tests :P (1:0 for them I guess ...)
 
 Everything is configured in `data/config.toml`, created on first run.
+
+By default it binds localhost only. To reach it from your other devices without a tunnel, bind your Tailscale address (`[daemon] bind = "100.x.y.z:8080"` in the config, or `--bind`, with `auth_token` required — it refuses anything public on purpose).
 
 The Python tool additionally needs Linux with `bwrap` and `uv` on `PATH`, without them the server refuses to start.
 

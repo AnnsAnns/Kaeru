@@ -1,7 +1,6 @@
-//! Shared boot wiring for the server binaries (M6): CLI parsing, config load,
-//! sandbox host check, core + stores construction, banner, and the tokio
-//! runtime with graceful shutdown. `agent-web` and `agent-daemon` differ only
-//! in their bind policy (ADR-030), so everything else lives here once.
+//! Shared boot wiring for the server binary (`agent-daemon`, M6): CLI parsing,
+//! config load, sandbox host check, core + stores construction, banner, and
+//! the tokio runtime with graceful shutdown.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -23,7 +22,7 @@ pub struct Cli {
     pub paths: Paths,
     pub fake: bool,
     pub record: bool,
-    /// `--bind host:port` (only parsed when the binary allows it; M6 daemon).
+    /// `--bind host:port` (ADR-030 bind policy applies at startup).
     pub bind: Option<String>,
 }
 
@@ -36,10 +35,9 @@ pub enum ParseError {
     Error(String),
 }
 
-/// The usage text for one binary. `--bind` is documented only where the
-/// binary accepts it (`allow_bind`).
-pub fn usage(bin: &str, allow_bind: bool) -> String {
-    let mut text = format!(
+/// The usage text for the server binary.
+pub fn usage(bin: &str) -> String {
+    format!(
         "\
 kaeru {bin}
 
@@ -50,33 +48,21 @@ Options:
       --cassette <PATH>   Record/replay fixture file [default: data/cassette.json]
       --fake              Keyless mode: fake provider + recorded cassettes
       --record            Live mode, recording every interaction to the cassette
+      --bind <ADDR>       Bind address (host:port): localhost (default) or a tailnet
+                          address (100.64.0.0/10, fd7a:115e:a297::/48); requires
+                          auth_token in the config (ADR-030)
+  -h, --help              Print this help
 "
-    );
-    if allow_bind {
-        text.push_str(
-            "      --bind <ADDR>       Bind address (host:port): localhost (default) or a tailnet\n",
-        );
-        text.push_str(
-            "                          address (100.64.0.0/10, fd7a:115e:a297::/48); requires\n",
-        );
-        text.push_str("                          auth_token in the config (ADR-030)\n");
-    }
-    text.push_str("  -h, --help              Print this help\n");
-    text
+    )
 }
 
-/// Parse the shared CLI. When `allow_bind` is false, `--bind` is an error
-/// pointing at `agent-daemon`.
-pub fn parse_cli(
-    bin: &str,
-    args: impl Iterator<Item = String>,
-    allow_bind: bool,
-) -> Result<Cli, ParseError> {
+/// Parse the CLI.
+pub fn parse_cli(bin: &str, args: impl Iterator<Item = String>) -> Result<Cli, ParseError> {
     let mut cli = Cli::default();
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "-h" | "--help" => return Err(ParseError::Help(usage(bin, allow_bind))),
+            "-h" | "--help" => return Err(ParseError::Help(usage(bin))),
             "--fake" => cli.fake = true,
             "--record" => cli.record = true,
             "--config" => {
@@ -86,12 +72,6 @@ pub fn parse_cli(
                 cli.paths.cassette = value_of(&mut args, &arg)?;
             }
             "--bind" => {
-                if !allow_bind {
-                    return Err(ParseError::Error(format!(
-                        "{bin} always binds 127.0.0.1 (C7); use agent-daemon --bind for a \
-                         tailnet bind (ADR-030)"
-                    )));
-                }
                 let value = args
                     .next()
                     .ok_or_else(|| ParseError::Error(format!("{arg} needs a value")))?;

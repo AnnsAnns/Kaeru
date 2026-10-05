@@ -1,15 +1,16 @@
-//! Kaeru `agent-daemon` (M6, ADR-011/030): owns `agent-core` + the `data/`
-//! dir and serves the shared `agent-server` API + web UI to any number of
-//! thin frontends. Binds localhost by default; `--bind` / `[daemon] bind` may
-//! name a tailnet address (never a public one), which requires `auth_token`
-//! in the config — startup fails closed without it.
+//! Kaeru `agent-daemon` (M6, ADR-011/030): the one server binary. Owns
+//! `agent-core` + the `data/` dir and serves the `agent-server` API + web UI
+//! to every client (browsers now; thin frontends like the Wayland frog helper
+//! and Discord later). Binds localhost by default; `--bind` / `[daemon] bind`
+//! may name a tailnet address (never a public one), which requires
+//! `auth_token` in the config — startup fails closed without it.
 
 use agent_server::{ParseError, bootstrap, parse_cli, run};
 
 fn main() {
     agent_server::init_tracing();
 
-    let cli = match parse_cli("agent-daemon", std::env::args().skip(1), true) {
+    let cli = match parse_cli("agent-daemon", std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(ParseError::Help(text)) => {
             eprintln!("{text}");

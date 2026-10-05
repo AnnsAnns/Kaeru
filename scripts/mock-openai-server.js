@@ -1,5 +1,5 @@
 // Mock OpenAI-compatible server for local end-to-end verification of
-// agent-web's live HTTP client path (not part of the app; dev tooling).
+// agent-daemon's live HTTP client path (not part of the app; dev tooling).
 const http = require("http");
 
 const KEY = "mock-key";

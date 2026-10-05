@@ -1,33 +1,35 @@
 # AGENTS.md — working in Kaeru
 
 Kaeru is a personal, single-user agent. A platform-agnostic Rust library
-(`agent-core`) is embedded by thin frontends; the first and only frontend so
-far is `agent-web`, an axum server that embeds a hand-written chat UI (no build
-step) and streams from any OpenAI-compatible provider.
+(`agent-core`) is embedded by thin frontends. A shared axum server library
+(`agent-server`) owns the HTTP API + hand-written chat UI (no build step) and
+is embedded by the single server binary `agent-daemon` (M6: owns the core +
+`data/`, binds localhost by default or a tailnet address). Streams from any
+OpenAI-compatible provider.
 
-`docs/arc42-architecture.md` is the **authoritative spec** (constraints C1–C18,
+`Kaeru-docs/arc42-architecture.md` is the **authoritative spec** (constraints C1–C18,
 ADRs, milestone roadmap M0–M7, acceptance checks). Read it before large
-changes; per-milestone implementation notes live in `docs/milestones/`.
+changes; per-milestone implementation notes live in `Kaeru-docs/milestones/`.
 
 ## Commands
 
 ```sh
-cargo run -p agent-web -- --fake     # keyless UI on the fake provider (http://127.0.0.1:8080)
-cargo run -p agent-web               # live provider
+cargo run -p agent-daemon -- --fake  # keyless UI on the fake provider (http://127.0.0.1:8080)
+cargo run -p agent-daemon            # live provider (bare `cargo run` works too — one binary)
 cargo test                           # full offline suite (fake provider, no network)
 cargo test -p agent-core             # core tests without compiling the frontend
 cargo fmt --all --check && cargo clippy --all-targets -- -D warnings
 node scripts/mock-openai-server.js   # dev-only OpenAI-compatible server for live-path e2e
 ```
 
-One command, no build step: the UI under `crates/agent-web/assets/` is embedded
+One command, no build step: the UI under `crates/agent-server/assets/` is embedded
 by rust-embed. `cargo run` works from the repo root: the server resolves `data/…`
 relative to the **current working directory** (not the binary), and the fake
 provider paints a delay so streaming is visible. Run from the repo root so
 `data/` lands where you expect.
 
 M5 host requirement: the Python sandbox needs Linux, unprivileged user
-namespaces, and `bwrap` + `uv` on `PATH`. `agent-web` checks this at startup and
+namespaces, and `bwrap` + `uv` on `PATH`. The server checks this at startup and
 exits (fail closed) with install instructions when it is missing.
 
 CI (`.github/workflows/ci.yml`) runs fmt check, clippy `-D warnings`,
@@ -38,7 +40,8 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 
 ```
 crates/agent-core/     library: config, events, llm (client/sse/fake/types/wire), session/{mod,turn,approvals,registry} (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python/todo), sandbox (envprep/exec/limits/workspace), search, audit, memory, todos
-crates/agent-web/      axum binary: main.rs (CLI), routes/{mod,handlers}, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
+crates/agent-server/   shared axum library: boot.rs (CLI + core wiring + runtime), bind.rs (ADR-030 policy), routes/{mod,handlers}, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
+crates/agent-daemon/   the single server binary (thin main over agent-server): owns core + data/, localhost or tailnet bind (ADR-030)
 data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + todos/{slug}.json + sandbox/{workspace,envs}
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
@@ -58,15 +61,19 @@ Bort/                  owner's blog — design reference ONLY (see below)
 - **C17 — Bort is reference-only:** `Bort/` is a nested git repo (the owner's
   Astro/Tailwind blog), git-ignored via `Bort/*`. It is never imported, never
   built, and deleting it must change nothing. Port design *by hand*: tokens
-  into `crates/agent-web/assets/app.css`, fonts copied as static `.otf` files.
+  into `crates/agent-server/assets/app.css`, fonts copied as static `.otf` files.
   Themes follow Bort's enum order in `assets/app.js` (the `THEMES` array skips
   `trans`, which CSS still ships); persisted under localStorage key
   `kaeru-theme`, auth token under `kaeru-auth-token`, selected thread under
   `kaeru-thread`.
-- **C7 — localhost only:** the server always binds `127.0.0.1`. Browser gating
-  is `X-Auth-Token` on `/api/*` (enforced only when `auth_token` is set;
-  static assets stay public). CORS is intentionally absent (same-origin).
-- **C13 — single binary:** UI assets (`crates/agent-web/assets/`) are embedded
+- **C7 — localhost only:** the server (`agent-daemon`) binds `127.0.0.1` by
+  default; the only allowed alternative is a **tailnet address**
+  (`100.64.0.0/10`, `fd7a:115e:a297::/48`), and startup fails closed past
+  localhost without `auth_token` (ADR-030) — never a public interface.
+  Browser gating is `X-Auth-Token` on `/api/*` (enforced only when
+  `auth_token` is set; static assets stay public). CORS is intentionally
+  absent (same-origin).
+- **C13 — single binary:** UI assets (`crates/agent-server/assets/`) are embedded
   via rust-embed — no build step, no Node (ADR-026 supersedes the Astro build
   of ADR-023). Editing anything under `assets/` requires a Rust rebuild.
 
@@ -89,13 +96,18 @@ stubs. Examples:
   consent-gated `python` tool with artifact events, and the authenticated
   workspace file flow. **M7** added named TODO lists: a plain-file core
   `TodoStore`, the consent-gated `todo` tool (`ApprovalKind::TodoWrite`), the
-  authenticated `/api/todos*` API and a web TODO tab. **M6** (Discord frontend
-  / daemon split) remains optional — do not build it early.
+  authenticated `/api/todos*` API and a web TODO tab. **M6** added the daemon
+  split: `agent-server` (shared lib: routes/bridge/error/files/markdown/
+  assets/boot/bind) and `agent-daemon` as the single server binary owning the
+  core + `data/` (the old `agent-web` binary was retired; localhost by
+  default, tailnet-only beyond with `X-Auth-Token` mandatory; ADR-011/030).
+  The thin frontends themselves (Wayland frog helper, Discord) are NOT built
+  yet — do not build them early.
 - **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
-When you complete milestone work, update the matching `docs/milestones/Mx.md`
+When you complete milestone work, update the matching `Kaeru-docs/milestones/Mx.md`
 notes (the repo treats those as the decision log); significant design changes
-belong in `docs/arc42-architecture.md` as a new ADR/version row.
+belong in `Kaeru-docs/arc42-architecture.md` as a new ADR/version row.
 
 ## Non-obvious patterns & gotchas
 
@@ -162,7 +174,12 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   deps)}/` with a `.complete` marker written only after a successful install;
   preparation goes to a hidden tmp dir + atomic rename under an in-process
   mutex. Never gate a cached dep set on consent again.
-- **M5 file flow:** `agent-web/src/files.rs` uploads the raw body to
+- **M6 daemon shape:** `agent-server` is the server implementation and
+  `agent-daemon` the only server binary — every client (browser UI now, thin
+  frontends later) routes through it; one owner process per `data/`. The bind
+  policy lives in `agent-server/src/bind.rs`; the `[daemon] bind` config key
+  is honored at startup, CLI `--bind` wins.
+- **M5 file flow:** `agent-server/src/files.rs` uploads the raw body to
   `?name=` (single component, no hidden names) and serves
   `GET /api/files/{*path}` through `agent_core::sandbox::workspace` — no
   `.`/`..` components, no internal/hidden names (the only dotted files in a
@@ -180,7 +197,8 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   reload; only images and inert text types open in a tab, HTML/SVG are
   download-only.
 - **M5 host check:** `Sandbox::check_host` (bwrap/uv + a real probe run) is
-  called by `main.rs` before anything binds; missing tools exit 1 with
+  called by the shared boot (`agent-server::boot::bootstrap`) before anything
+  binds; missing tools exit 1 with
   instructions. Tests that need bwrap call `check_host` and skip with a note
   when the host cannot sandbox (CI without bwrap stays green).
 - **M7 TODO lists:** `agent-core/src/todos.rs` is a plain-file store (one
@@ -207,7 +225,7 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   tests the fallback is **off**, so unmatched requests are loud errors.
   `RecordingClient` decorates `dyn LlmClient`, which is why record→replay is
   unit-testable offline. `--fake` and `--record` are mutually exclusive.
-- **Error → HTTP mapping** (`agent-web/src/error.rs`): `busy`→409, `config`→400
+- **Error → HTTP mapping** (`agent-server/src/error.rs`): `busy`→409, `config`→400
   (server-side config → 500), `internal`→500, all provider kinds→502 (gateway).
   A missing *thread* from the registry is mapped separately to a plain 404
   (`routes::thread_error`), since `NotFound` on the provider path is a gateway
@@ -219,10 +237,11 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   newest-first and skips foreign file names.
 - **Auth comparison** is length-check + XOR fold (not constant-time crypto, but
   non-trivial timing); `auth_token` is normalized (empty ⇒ `None`) at parse time.
-- **CLI is hand-rolled** (no clap) in `agent-web/src/main.rs`; options are
-  `--config`, `--cassette`, `--fake`, `--record`, `-h/--help`. `Paths` holds
-  the defaults and is overridable.
-- **Markdown is server-side (ADR-026):** `agent-web/src/markdown.rs` is the
+- **CLI is hand-rolled** (no clap), shared in `agent-server/src/boot.rs`;
+  options are `--config`, `--cassette`, `--fake`, `--record`, `--bind`
+  (ADR-030-checked), `-h/--help`. `Paths` holds the defaults and is
+  overridable.
+- **Markdown is server-side (ADR-026):** `agent-server/src/markdown.rs` is the
   only place that turns Markdown into HTML. It walks `pulldown-cmark` events and
   emits an allow-list, so raw HTML and dangerous link schemes are never emitted.
   `/api/threads/{id}` ships sanitized `html` per assistant message (raw
@@ -240,15 +259,18 @@ belong in `docs/arc42-architecture.md` as a new ADR/version row.
   inline column, while memory/TODO/settings open as **fixed panels in the empty
   gutter to the right of the centred 1100px `#app`** — out of flow, so the chat
   column is never squeezed (they only overlap the app's right edge on narrower
-  desktops). Don't reintroduce the old wrapping header chips, and don't make the
-  right-side panels inline columns again — that squished the chat output.
+  desktops). Those panels are anchored **below the top bar** (`--panel-top`,
+  measured from the workspace row in `app.js`), so an open panel never covers
+  the icon buttons that toggle it. Don't reintroduce the old wrapping header
+  chips, don't make the right-side panels inline columns again — that squished
+  the chat output — and don't anchor them back to the viewport top.
 
 ## Testing
 
 - Everything is **offline**: the fake provider replays cassettes/canned
   responses; never add tests that hit the network. `scripts/mock-openai-server.js`
   is for *manual* live-path verification only, not the test suite.
-- Prefer unit tests next to the code (`#[cfg(test)] mod tests`); `agent-web`
+- Prefer unit tests next to the code (`#[cfg(test)] mod tests`); `agent-server`
   route tests drive the axum router via `tower::ServiceExt::oneshot` with an
   in-process `AppState` (dev-deps: `http-body-util`, `tower`). `AppState::fake()`
   uses a throwaway conversations directory per test.
@@ -274,6 +296,6 @@ browser), `conversations/{id}.json` (atomic tmp+rename writes; unreadable or
 unknown-schema files are **quarantined** aside rather than crashing a turn),
 and `sandbox/workspace/` (uploads + script outputs; user data).
 `sandbox/envs/` is disposable — rebuildable from the dep sets — so backups
-may skip it. The deployment guide (`docs/deployment.md`) covers systemd +
+may skip it. The deployment guide (`Kaeru-docs/deployment.md`) covers systemd +
 cloudflared + Cloudflare Access; `WorkingDirectory=` is what places `data/`
 correctly there.

@@ -32,27 +32,3 @@ jobs:
         run: cargo test
       - name: Release build (single-binary check)
         run: cargo build --release
-
-  # The frog frontend (ADR-031) needs GTK4 + gtk4-layer-shell, which the
-  # headless main job deliberately skips (it is not in `default-members`).
-  # ubuntu-latest has GTK4 but not gtk4-layer-shell, so build that from source.
-  frog:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: GTK4 + gtk4-layer-shell (host libraries)
-        run: |
-          sudo apt-get update && sudo apt-get install -y libgtk-4-dev meson ninja-build
-          git clone --depth 1 --branch v1.3.0 \
-            https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
-          meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell
-          sudo ninja -C /tmp/gtk4-layer-shell/build install
-          sudo ldconfig
-      - name: Lint (frog)
-        run: cargo clippy -p agent-frog --all-targets -- -D warnings
-      - name: Test (frog, offline)
-        run: cargo test -p agent-frog

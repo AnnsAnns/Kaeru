@@ -43,6 +43,154 @@
   const settingsBtn = $("settings-btn");
   const backdrop = $("backdrop");
 
+  /* ---------- the pond frog (M6 follow-up) ----------
+     The same four spritesheets the Wayland helper embeds, served from
+     /frog/*.png and composited on a small canvas: the idle sheet is the base
+     (frame 0 rests, the rest is a blink), and sleeping/speaking/thinking are
+     transparent overlays. `setState` mirrors the helper's animation state. */
+  const frogHome = $("frog-home");
+  const frogDesk = $("frog-desk");
+  const frogEl = document.createElement("canvas");
+  frogEl.className = "frog";
+  frogEl.width = 20;
+  frogEl.height = 20;
+  frogEl.title = "kaeru";
+  frogEl.setAttribute("aria-hidden", "true");
+
+  const Frog = (() => {
+    const SHEETS = {
+      idle: "/frog/frog_idle.png",
+      sleeping: "/frog/frog_sleeping.png",
+      speaking: "/frog/frog_speaking.png",
+      thinking: "/frog/frog_thinking.png",
+    };
+    const FRAME = 20; // every sheet is a strip of 20x20 frames
+    const TICK_MS = 250; // thinking/speaking framerate (the helper's `fps = 4`)
+    const BLINK_REST = 20; // ticks between blinks (~5s)
+    const SLEEP_FRAME = 20; // ticks per sleeping frame (~5s)
+    const SLEEP_MIN = 480; // doze off after ~2 min idle…
+    const SLEEP_MAX = 1200; // …up to ~5 min, chosen randomly
+
+    const images = {};
+    for (const [name, src] of Object.entries(SHEETS)) {
+      const img = new Image();
+      img.src = src;
+      images[name] = img;
+    }
+    const ctx = frogEl.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+
+    const frames = (img) =>
+      img.naturalHeight ? Math.round(img.naturalWidth / img.naturalHeight) : 0;
+    const randomSleep = () =>
+      SLEEP_MIN + Math.floor(Math.random() * (SLEEP_MAX - SLEEP_MIN));
+
+    const s = {
+      state: "idle",
+      base: 0,
+      baseRest: BLINK_REST,
+      overlay: 0,
+      overlayWait: 0,
+      idle: 0,
+      sleepAfter: randomSleep(),
+    };
+
+    function draw() {
+      if (!frames(images.idle)) return;
+      ctx.clearRect(0, 0, FRAME, FRAME);
+      ctx.drawImage(images.idle, s.base * FRAME, 0, FRAME, FRAME, 0, 0, FRAME, FRAME);
+      const overlay = s.state === "idle" ? null : images[s.state];
+      const on = overlay ? frames(overlay) : 0;
+      if (on) {
+        ctx.drawImage(
+          overlay,
+          (s.overlay % on) * FRAME,
+          0,
+          FRAME,
+          FRAME,
+          0,
+          0,
+          FRAME,
+          FRAME
+        );
+      }
+    }
+
+    function resetIdle() {
+      s.idle = 0;
+      s.sleepAfter = randomSleep();
+    }
+
+    function setState(state) {
+      if (state === s.state) {
+        if (state === "idle") resetIdle();
+        return;
+      }
+      s.state = state;
+      s.overlay = 0;
+      s.overlayWait = state === "sleeping" ? SLEEP_FRAME - 1 : 0;
+      if (state === "idle") resetIdle();
+      draw();
+    }
+
+    function wake() {
+      const wasSleeping = s.state === "sleeping";
+      if (wasSleeping) {
+        s.state = "idle";
+        s.overlay = 0;
+        s.overlayWait = 0;
+      }
+      resetIdle();
+      if (wasSleeping) draw();
+    }
+
+    function tick() {
+      let dirty = false;
+      const n = frames(images.idle);
+      if (n > 1) {
+        if (s.baseRest > 0) s.baseRest -= 1;
+        else {
+          s.base = (s.base + 1) % n;
+          if (s.base === 0) s.baseRest = BLINK_REST;
+          dirty = true;
+        }
+      }
+      const on = s.state === "idle" ? 0 : frames(images[s.state]);
+      if (s.state === "thinking" || s.state === "speaking") {
+        if (on > 1) {
+          s.overlay = (s.overlay + 1) % on;
+          dirty = true;
+        }
+      } else if (s.state === "sleeping" && on > 1) {
+        if (s.overlayWait > 0) s.overlayWait -= 1;
+        else {
+          s.overlay = (s.overlay + 1) % on;
+          s.overlayWait = SLEEP_FRAME - 1;
+          dirty = true;
+        }
+      }
+      if (s.state === "idle") {
+        s.idle += 1;
+        if (s.idle >= s.sleepAfter) {
+          setState("sleeping");
+          return;
+        }
+      }
+      if (dirty) draw();
+    }
+
+    images.idle.addEventListener("load", draw);
+    setInterval(tick, TICK_MS);
+    return { setState, wake };
+  })();
+
+  // The frog sits in the header on phones and in the composer on desktop (the
+  // same 900px breakpoint the panels use, C8).
+  const desktopMq = window.matchMedia("(min-width: 900px)");
+  const placeFrog = () => (desktopMq.matches ? frogDesk : frogHome).append(frogEl);
+  desktopMq.addEventListener("change", placeFrog);
+  placeFrog();
+
   /* ---------- panels: one open at a time (drawers on mobile) ---------- */
 
   const PANELS = {
@@ -586,6 +734,7 @@
     stopBtn.hidden = !busy;
     sendBtn.disabled = busy;
     regenBtn.disabled = busy;
+    if (busy) Frog.setState("thinking");
   }
 
   /* A fresh assistant box wired for streaming: thinking block, live text,
@@ -656,6 +805,7 @@
     turn.cursor.remove();
     state.fetchCtrl = null;
     setBusy(false);
+    Frog.setState("idle");
 
     if (turn.errorMsg) {
       if (!turn.text) turn.ai.box.remove();
@@ -1070,6 +1220,7 @@
     switch (event.type) {
       case "delta":
         turn.text += event.text;
+        Frog.setState("speaking");
         // Fold the live thinking block away once the answer starts; it stays
         // available behind the summary triangle.
         if (turn.thinking && turn.reasoning && turn.thinking.open) {
@@ -1079,6 +1230,8 @@
         break;
       case "reasoning":
         turn.reasoning += event.text;
+        // Still thinking until the answer itself starts streaming.
+        if (!turn.text) Frog.setState("thinking");
         turn.paint();
         break;
       case "tool_call": {
@@ -1156,7 +1309,10 @@
     composerEl.style.height = "auto";
     composerEl.style.height = `${Math.min(composerEl.scrollHeight, innerHeight * 0.3)}px`;
   }
-  composerEl.addEventListener("input", autosize);
+  composerEl.addEventListener("input", () => {
+    Frog.wake();
+    autosize();
+  });
   composerEl.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       // Enter sends on desktop keyboards; on touch devices enter makes a

@@ -12,7 +12,7 @@
     <header class="box topbar">
       <button id="threads-btn" class="icon-btn" type="button" title="Threads"
         aria-label="Threads" aria-expanded="false">🧵</button>
-      <h1 class="app-name">Kaeru <span aria-hidden="true">🐸</span></h1>
+      <h1 class="app-name">Kaeru <span id="frog-home" class="frog-slot"></span></h1>
       <span id="fake-badge" class="badge fake-badge" hidden>fake</span>
       <div class="topbar-actions">
         <button id="todo-btn" class="icon-btn" type="button" title="TODO lists"
@@ -105,6 +105,7 @@
       </div>
       <div id="attachments" class="attachments" hidden></div>
       <div class="composer-row">
+        <span id="frog-desk" class="frog-slot"></span>
         <textarea id="composer" rows="1" placeholder="talk to the frogs…"
           enterkeyhint="send" autocomplete="off" spellcheck="true"></textarea>
         <div class="composer-side" role="group" aria-label="Answer actions">

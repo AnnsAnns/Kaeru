@@ -172,6 +172,30 @@ body {
   margin: 0;
   white-space: nowrap;
 }
+/* The pond frog mascot (M6 follow-up): the same spritesheets the Wayland helper
+   uses, composited on a canvas and scaled up crisp. It lives in the header on
+   phones and in the composer on desktop (the 900px breakpoint, C8). */
+.frog-slot {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -0.35em;
+}
+.frog-slot:empty {
+  display: none;
+}
+.frog {
+  width: 1.5em;
+  height: 1.5em;
+  image-rendering: pixelated;
+}
+.composer-row .frog-slot {
+  align-self: center;
+  vertical-align: baseline;
+}
+.composer-row .frog {
+  width: 56px;
+  height: 56px;
+}
 .topbar-actions {
   margin-left: auto;
   display: flex;

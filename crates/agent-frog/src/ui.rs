@@ -78,7 +78,8 @@ struct ChatUi {
     streaming: bool,
     connecting: bool,
     turn: Option<Turn>,
-    _sprite: Option<gtk::glib::SourceId>,
+    /// Drives the idle/blink/sleeping/thinking/speaking animation.
+    sprite: sprite::Avatar,
     /// Keeps the channel-drain future attached for the process lifetime.
     _channel: Option<gtk::glib::SourceId>,
 }
@@ -167,14 +168,29 @@ pub fn build(
     panel.append(&input_row);
 
     // ---- avatar + root ----
-    let (avatar, sprite_source) = sprite::avatar_button(&config);
-    avatar.set_size_request(52, 52);
-    avatar.set_halign(gtk::Align::End);
-    avatar.set_valign(gtk::Align::End);
+    // The avatar is the anchor: it must stay flush with the configured corner
+    // so expanding/collapsing the panel never moves it. A layer surface can
+    // keep its previous (larger) size for a frame — or longer, if the
+    // compositor does not reconfigure promptly — and a box that fills that
+    // surface would pin the avatar to the opposite edge. Aligning the box to
+    // the anchored corner keeps the frog put, and the panel grows away from
+    // that corner (above the frog for a bottom anchor, below it for a top one).
+    let (align_h, align_v) = corner_align(edge_h, edge_v);
+    let sprite = sprite::avatar_button(&config);
+    let avatar = sprite.button().clone();
+    avatar.set_halign(align_h);
+    avatar.set_valign(align_v);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.add_css_class("frog-root");
-    root.append(&panel);
-    root.append(&avatar);
+    root.set_halign(align_h);
+    root.set_valign(align_v);
+    if edge_v == Edge::Bottom {
+        root.append(&panel);
+        root.append(&avatar);
+    } else {
+        root.append(&avatar);
+        root.append(&panel);
+    }
     window.set_child(Some(&root));
 
     // ---- theme ----
@@ -221,7 +237,7 @@ pub fn build(
         streaming: false,
         connecting: false,
         turn: None,
-        _sprite: sprite_source,
+        sprite,
         _channel: None,
     }));
 
@@ -362,6 +378,7 @@ fn install_drag(ui: &Rc<RefCell<ChatUi>>) {
             start.set(u.margins);
             u.suppress_click = false;
             u.dragged = false;
+            u.sprite.wake();
         });
     }
     {
@@ -424,6 +441,24 @@ fn corner_edges(corner: &str) -> (Edge, Edge) {
     }
 }
 
+/// Alignment for the widget tree so it hugs the anchored corner: the avatar
+/// (and the box around it) stay flush with the two anchored edges, which keeps
+/// the frog in place even if the layer surface briefly keeps a larger size
+/// while the panel expands or collapses.
+fn corner_align(edge_h: Edge, edge_v: Edge) -> (gtk::Align, gtk::Align) {
+    let align_h = if edge_h == Edge::Right {
+        gtk::Align::End
+    } else {
+        gtk::Align::Start
+    };
+    let align_v = if edge_v == Edge::Bottom {
+        gtk::Align::End
+    } else {
+        gtk::Align::Start
+    };
+    (align_h, align_v)
+}
+
 /* ---------- widget helpers ---------- */
 
 struct BoxView {
@@ -483,6 +518,7 @@ fn connect(ui: &Rc<RefCell<ChatUi>>) {
             u.suppress_click = false;
             suppress
         };
+        ui_avatar.borrow().sprite.wake();
         if !suppress {
             toggle_panel(&ui_avatar);
         }
@@ -514,18 +550,34 @@ fn connect(ui: &Rc<RefCell<ChatUi>>) {
 }
 
 fn toggle_panel(ui: &Rc<RefCell<ChatUi>>) {
-    if ui.borrow().panel.is_visible() {
-        collapse(ui);
-    } else {
-        let panel = ui.borrow().panel.clone();
-        let entry = ui.borrow().entry.clone();
-        panel.set_visible(true);
-        entry.grab_focus();
-    }
+    let visible = !ui.borrow().panel.is_visible();
+    set_panel(ui, visible);
 }
 
 fn collapse(ui: &Rc<RefCell<ChatUi>>) {
-    ui.borrow().panel.set_visible(false);
+    set_panel(ui, false);
+}
+
+/// Show or hide the chat panel and resize the layer surface to match.
+///
+/// GTK does not shrink a compositor-sized (layer-shell) toplevel on its own
+/// when the panel is hidden, so the invisible surface would keep covering the
+/// expanded area; the first drag after collapsing would then snap the frog
+/// into the corner when the surface finally resized under the pointer. Setting
+/// the default size to the window's new natural size fires gtk4-layer-shell's
+/// preferred-size invalidation and makes the surface take exactly the space it
+/// needs. The avatar stays anchored either way (see `corner_align`).
+fn set_panel(ui: &Rc<RefCell<ChatUi>>, visible: bool) {
+    let (panel, entry, window) = {
+        let u = ui.borrow();
+        (u.panel.clone(), u.entry.clone(), u.window.clone())
+    };
+    panel.set_visible(visible);
+    if visible {
+        entry.grab_focus();
+    }
+    let (_, natural) = window.preferred_size();
+    window.set_default_size(natural.width(), natural.height());
 }
 
 /* ---------- connection ---------- */
@@ -661,6 +713,7 @@ fn begin_turn(ui: &Rc<RefCell<ChatUi>>, message: &str) {
     });
     set_streaming(ui, true);
     set_status(ui, "thinking…");
+    ui.borrow().sprite.set_state(sprite::State::Thinking);
     scroll_to_bottom(ui);
 }
 
@@ -701,6 +754,7 @@ fn handle_msg(ui: &Rc<RefCell<ChatUi>>, msg: UiMsg) {
             if let Some(turn) = ui.borrow_mut().turn.take() {
                 turn.card.unparent();
             }
+            ui.borrow().sprite.set_state(sprite::State::Idle);
             set_streaming(ui, false);
             set_status(ui, "auth required");
             token_prompt(ui);
@@ -710,13 +764,26 @@ fn handle_msg(ui: &Rc<RefCell<ChatUi>>, msg: UiMsg) {
                 turn.text.push_str(&text);
                 turn.body.set_text(&turn.text);
             }
+            ui.borrow().sprite.set_state(sprite::State::Speaking);
             scroll_to_bottom(ui);
         }
         UiMsg::Reasoning(text) => {
-            if let Some(turn) = ui.borrow_mut().turn.as_mut() {
-                turn.reasoning.push_str(&text);
-                turn.thinking_body.set_text(&turn.reasoning);
-                turn.thinking.set_visible(true);
+            let speaking = {
+                let mut u = ui.borrow_mut();
+                match u.turn.as_mut() {
+                    Some(turn) => {
+                        turn.reasoning.push_str(&text);
+                        turn.thinking_body.set_text(&turn.reasoning);
+                        turn.thinking.set_visible(true);
+                        !turn.text.is_empty()
+                    }
+                    None => false,
+                }
+            };
+            // Keep thinking while no answer text has arrived; once the frog is
+            // speaking, a late reasoning chunk must not interrupt the mouth.
+            if !speaking {
+                ui.borrow().sprite.set_state(sprite::State::Thinking);
             }
             scroll_to_bottom(ui);
         }
@@ -728,6 +795,7 @@ fn handle_msg(ui: &Rc<RefCell<ChatUi>>, msg: UiMsg) {
         UiMsg::Approval { id, summary } => approval_card(ui, id, summary),
         UiMsg::Done(usage) => {
             ui.borrow_mut().turn = None;
+            ui.borrow().sprite.set_state(sprite::State::Idle);
             set_streaming(ui, false);
             let base = ui.borrow().client.base().to_owned();
             set_status(ui, &format!("ready · {base}{}", format_usage(usage)));
@@ -736,6 +804,7 @@ fn handle_msg(ui: &Rc<RefCell<ChatUi>>, msg: UiMsg) {
             if let Some(turn) = ui.borrow_mut().turn.take() {
                 turn.title.set_text("kaeru · stopped");
             }
+            ui.borrow().sprite.set_state(sprite::State::Idle);
             set_streaming(ui, false);
             set_status(ui, "stopped");
         }
@@ -752,6 +821,7 @@ fn handle_msg(ui: &Rc<RefCell<ChatUi>>, msg: UiMsg) {
                     None => {}
                 }
             }
+            ui.borrow().sprite.set_state(sprite::State::Idle);
             set_streaming(ui, false);
             set_status(ui, "error");
             error_card(ui, &message, false);
@@ -949,5 +1019,27 @@ mod tests {
         // No monitor size known: only the non-negative clamp.
         assert_eq!(drag_margin(18, -100.0, 1, 0, 100), 0);
         assert_eq!(drag_margin(18, 5000.0, 1, 0, 100), 5018);
+    }
+
+    #[test]
+    fn corner_align_hugs_the_anchored_edges() {
+        // A bottom-right frog hugs the bottom and right, so a stale (larger)
+        // layer surface cannot push it to the top-left.
+        assert_eq!(
+            corner_align(Edge::Right, Edge::Bottom),
+            (gtk::Align::End, gtk::Align::End)
+        );
+        assert_eq!(
+            corner_align(Edge::Left, Edge::Top),
+            (gtk::Align::Start, gtk::Align::Start)
+        );
+        assert_eq!(
+            corner_align(Edge::Right, Edge::Top),
+            (gtk::Align::End, gtk::Align::Start)
+        );
+        assert_eq!(
+            corner_align(Edge::Left, Edge::Bottom),
+            (gtk::Align::Start, gtk::Align::End)
+        );
     }
 }

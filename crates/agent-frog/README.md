@@ -50,11 +50,11 @@ token  = ""                        # X-Auth-Token; required past localhost
 theme  = "latenightbath"
 corner = "bottom-right"            # bottom-right|bottom-left|top-right|top-left
 thread = ""                        # empty = newest thread, created on demand
-avatar = "🐸"
+avatar = "🐸"                      # emoji fallback if the built-in sprite fails
 
-[sprite]                           # drop real art in later:
-frames = []                        # e.g. ["idle.png", "blink.png"]
-fps    = 4
+[sprite]                           # custom art override:
+frames = []                        # e.g. ["idle.png", "blink.png"]; empty = built-in frog_idle
+fps    = 4                         # animation speed for a multi-frame sprite
 
 [position]                         # persisted by dragging
 h = 18

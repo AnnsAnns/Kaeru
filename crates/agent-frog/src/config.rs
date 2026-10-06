@@ -62,15 +62,18 @@ impl Default for PositionConfig {
     }
 }
 
-/// Sprite frames (M6 follow-up seam): leave `frames` empty to draw the emoji
-/// `avatar`; drop real images in and they animate at `fps`.
+/// Sprite frames (M6): leave `frames` empty to use the built-in `frog_idle`
+/// spritesheet (frame 0 idles, the rest is a blink); list image files and they
+/// cycle at `fps` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpriteConfig {
-    /// Image paths (PNG/SVG/…), cycled in order. Empty = use the emoji.
+    /// Image paths (PNG/SVG/…), cycled in order. Empty = the built-in
+    /// `frog_idle` sheet.
     #[serde(default)]
     pub frames: Vec<PathBuf>,
-    /// Animation speed for a multi-frame sprite.
+    /// Animation speed for the built-in thinking/speaking overlays and any
+    /// custom frame list.
     #[serde(default = "default_fps")]
     pub fps: u32,
 }
@@ -106,7 +109,7 @@ pub struct FrogConfig {
     /// Pin a specific thread id. Empty = the newest thread, created on demand.
     #[serde(default)]
     pub thread: String,
-    /// Emoji avatar, used when `[sprite] frames` is empty.
+    /// Emoji fallback, used only if the built-in sprite cannot be decoded.
     #[serde(default = "default_avatar")]
     pub avatar: String,
     #[serde(default)]

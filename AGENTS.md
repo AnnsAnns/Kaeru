@@ -18,6 +18,7 @@ cargo run -p agent-daemon -- --fake  # keyless UI on the fake provider (http://1
 cargo run -p agent-daemon            # live provider (bare `cargo run` works too — one binary)
 cargo test                           # full offline suite (fake provider, no network)
 cargo test -p agent-core             # core tests without compiling the frontend
+cargo run -p agent-frog              # Wayland frog helper (needs gtk4 + gtk4-layer-shell)
 cargo fmt --all --check && cargo clippy --all-targets -- -D warnings
 node scripts/mock-openai-server.js   # dev-only OpenAI-compatible server for live-path e2e
 ```
@@ -33,8 +34,12 @@ namespaces, and `bwrap` + `uv` on `PATH`. The server checks this at startup and
 exits (fail closed) with install instructions when it is missing.
 
 CI (`.github/workflows/ci.yml`) runs fmt check, clippy `-D warnings`,
-`cargo test -p agent-core`, `cargo test`, then a release build. Match that
-locally before finishing. Toolchain is Rust **edition 2024**.
+`cargo test -p agent-core`, `cargo test`, then a release build; a separate
+`frog` job installs GTK4 + builds `gtk4-layer-shell` and lints/tests
+`agent-frog`. Match that locally before finishing. Toolchain is Rust
+**edition 2024**. `agent-frog` is a workspace member but not in
+`default-members`, so the headless commands above never build GTK; use
+`-p agent-frog` explicitly.
 
 ## Layout
 
@@ -42,6 +47,7 @@ locally before finishing. Toolchain is Rust **edition 2024**.
 crates/agent-core/     library: config, events, llm (client/sse/fake/types/wire), session/{mod,turn,approvals,registry} (+ ConversationRegistry), context, conversations, error, agent (loop + workers + reflect), tools (web_search/memory/python/todo), sandbox (envprep/exec/limits/workspace), search, audit, memory, todos
 crates/agent-server/   shared axum library: boot.rs (CLI + core wiring + runtime), bind.rs (ADR-030 policy), routes/{mod,handlers}, bridge.rs, error.rs, assets.rs, markdown.rs, files.rs, assets/ (embedded UI)
 crates/agent-daemon/   the single server binary (thin main over agent-server): owns core + data/, localhost or tailnet bind (ADR-030)
+crates/agent-frog/     Wayland frog helper (GTK4 + gtk4-layer-shell thin /api/* client): config, theme (Bort tokens -> GTK CSS), client (SSE), sprite, ui (ADR-031)
 data/                  runtime state, CWD-relative, git-ignored: config.toml (0600) + conversations/{id}.json + audit.jsonl + memory/ + persona.md + reflect-state.json + todos/{slug}.json + sandbox/{workspace,envs}
 scripts/               dev tooling (mock provider server)
 Bort/                  owner's blog — design reference ONLY (see below)
@@ -101,8 +107,10 @@ stubs. Examples:
   assets/boot/bind) and `agent-daemon` as the single server binary owning the
   core + `data/` (the old `agent-web` binary was retired; localhost by
   default, tailnet-only beyond with `X-Auth-Token` mandatory; ADR-011/030).
-  The thin frontends themselves (Wayland frog helper, Discord) are NOT built
-  yet — do not build them early.
+  The **Wayland frog helper is now built** (`crates/agent-frog`, v0.27,
+  ADR-031): a GTK4 + `gtk4-layer-shell` thin `/api/*` client (draggable
+  always-on-top 🐸 square + streaming chat panel + inline consent). The
+  **Discord frontend is NOT built yet** — do not build it early.
 - **M2.5** added threads (registry + sidebar) but no tools, memory, or sandbox.
 
 When you complete milestone work, update the matching `Kaeru-docs/milestones/Mx.md`
@@ -179,6 +187,16 @@ belong in `Kaeru-docs/arc42-architecture.md` as a new ADR/version row.
   frontends later) routes through it; one owner process per `data/`. The bind
   policy lives in `agent-server/src/bind.rs`; the `[daemon] bind` config key
   is honored at startup, CLI `--bind` wins.
+- **M6 frog helper:** `agent-frog` is a *client*, not a server — it speaks the
+  same `/api/*` wire API and mirrors `CoreEvent` as a local serde enum (exactly
+  like `app.js` does), so it never depends on `agent-core` (C2). It is a
+  workspace member but excluded from `default-members` (GTK4 + `gtk4-layer-shell`
+  are host libraries); build it with `-p agent-frog`. GTK4 CSS has no custom
+  properties and no `@font-face`, so `theme.rs` regenerates the whole stylesheet
+  per theme and the Bort fonts are embedded + registered with fontconfig at
+  startup. The collapsed avatar is a draggable square: layer surfaces cannot be
+  client-moved, so a drag rewrites the two anchored margins (clamped to the
+  monitor, persisted to `[position]`) and suppresses the expand click.
 - **M5 file flow:** `agent-server/src/files.rs` uploads the raw body to
   `?name=` (single component, no hidden names) and serves
   `GET /api/files/{*path}` through `agent_core::sandbox::workspace` — no

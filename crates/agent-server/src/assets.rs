@@ -125,6 +125,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frog_sprites_are_served() {
+        // The pond frog's spritesheets are shared with the Wayland helper.
+        let png = get("/frog/frog_idle.png").await;
+        assert_eq!(png.status(), StatusCode::OK);
+        assert_eq!(png.headers()["content-type"], "image/png");
+        assert_eq!(png.headers()["cache-control"], "public, max-age=3600");
+    }
+
+    #[tokio::test]
     async fn page_and_code_are_never_cached() {
         // A stale page paired with fresh scripts can break the UI after a
         // deploy, so HTML/JS/CSS must revalidate on every load.
